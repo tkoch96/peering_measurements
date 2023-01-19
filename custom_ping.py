@@ -251,17 +251,22 @@ class Custom_Pinger:
 
 
 if __name__ == "__main__":
-	targ = ['95.47.119.153']
-	import numpy as np
-	res = []
-	for src in ['184.164.240.1','184.164.241.1']:
-		np.random.shuffle(targ)
-		cp = Custom_Pinger(src, 'tap5', targ)
-		cp.run()
-		res.append(cp.get_finished_meas())
-	in_both = [k for k in res[0] if k in res[1]]
-	in_both = [k for k in res[0] if res[0][k]['rtt'] != -1 and res[1][k]['rtt'] != -1]
-	diffs = [res[0][k]['rtt'] - res[1][k]['rtt'] for k in in_both]
-	for dst, diff in zip(in_both, diffs):
-		print("{} -- ({} ms diff), Peer A: {}, Peer B: {}".format(dst,
-			diff, res[0][dst]['peer_mac'], res[1][dst]['peer_mac']))
+	### Old test script
+	# targ = ['95.47.119.153']
+	# import numpy as np
+	# res = []
+	# for src in ['184.164.240.1','184.164.241.1']:
+	# 	np.random.shuffle(targ)
+	# 	cp = Custom_Pinger(src, 'tap5', targ)
+	# 	cp.run()
+	# 	res.append(cp.get_finished_meas())
+	# in_both = [k for k in res[0] if k in res[1]]
+	# in_both = [k for k in res[0] if res[0][k]['rtt'] != -1 and res[1][k]['rtt'] != -1]
+	# diffs = [res[0][k]['rtt'] - res[1][k]['rtt'] for k in in_both]
+	# for dst, diff in zip(in_both, diffs):
+	# 	print("{} -- ({} ms diff), Peer A: {}, Peer B: {}".format(dst,
+	# 		diff, res[0][dst]['peer_mac'], res[1][dst]['peer_mac']))
+
+	import argparse
+	cp = Custom_Pinger(src,tap,targs)
+	pickle.dump(cp.get_finished_meas(), open(args.outfn,'wb'))
