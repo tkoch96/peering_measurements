@@ -1,9 +1,55 @@
-import socket, time, struct, select, numpy as np, re, datetime, tqdm
-from constants import *
+import socket, time, struct, select, numpy as np, re, datetime, tqdm, multiprocessing, copy
+from config import *
 import netifaces as ni, os
 from subprocess import call, check_output
 
 PINGER = "sudo /home/tom/pinger/target/release/pinger"
+
+pop_to_outfn = lambda pop : os.path.join(TMP_DIR, "tcpdumpout_{}.txt".format(pop))
+def parse_ping_results(*args):
+	pop, meas_ret, _id_to_meas_i, srcsdict, dstsdict, = args[0]
+	n_rounds = len(_id_to_meas_i)
+	for row in open(pop_to_outfn(pop), 'r'):
+		# parse the measurements
+		try:
+			if "request" in row:
+				rowre = re.search("(.+) IP (.+) \> (.+)\: ICMP echo request\, id (.+)\, seq", row)
+				t,src,dst,_id = rowre.group(1), rowre.group(2), rowre.group(3),rowre.group(4).strip()
+				which = 'start'
+			elif "reply" in row: # ping reply to us
+				rowre = re.search("(.+) IP (.+) \> (.+)\: ICMP echo reply\, id (.+)\, seq", row)
+				t,dst,src,_id = rowre.group(1), rowre.group(2), rowre.group(3),rowre.group(4).strip()
+				which = 'end'
+			else:
+				continue
+		except AttributeError: # invalid line
+			continue
+		try:
+			srcsdict[src]
+		except KeyError:
+			# not a ping from our program
+			continue
+		try:
+			dstsdict[dst] # not a dst we're tracking, random noise
+		except KeyError:
+			continue
+		_id = int(_id)
+		try:
+			this_dst_meas_i = _id_to_meas_i[_id]
+		except KeyError:
+			# not a dst we're tracking, random noise
+			continue
+		t = datetime.datetime.strptime(t, '%H:%M:%S.%f').timestamp()
+		try:
+			meas_ret[src][dst]
+		except KeyError:
+			meas_ret[src][dst] = [{'pop': None, 't_start': None, 't_end': None, 'rtt': None} for _ in \
+				range(n_rounds)]
+		meas_ret[src][dst][this_dst_meas_i]["t_" + which] = float(t)
+		if which == 'end':
+			meas_ret[src][dst][this_dst_meas_i]['pop'] = pop
+		meas_ret[src][dst][this_dst_meas_i][which + 'pop'] = pop
+	return meas_ret
 
 class Pinger_Wrapper:
 	def __init__(self, pops, pop_to_intf):
@@ -45,10 +91,9 @@ class Pinger_Wrapper:
 			self.setup_iptable(src, tap)
 			i += 1
 		target_fn = os.path.join(TMP_DIR, 'tmp_targ_fn.txt')
-		pseudo_timeout = 3
+		pseudo_timeout = 2
 		OUR_PING_ID = 31415
 		try:
-			pop_to_outfn = lambda pop : os.path.join(TMP_DIR, "tcpdumpout_{}.txt".format(pop))
 
 			for pop in self.pops:
 				call("sudo tcpdump -i {} -n icmp > {} &".format(self.pop_to_intf[pop], pop_to_outfn(pop)), shell=True)
@@ -57,17 +102,19 @@ class Pinger_Wrapper:
 
 			### Time to complete is approximately however many rate limit rounds there are		
 			n_s_per_round = np.max([np.ceil(len(dsts) / self.rate_limit) + \
-				pseudo_timeout for dsts in dsts_sets]) + 10
+				pseudo_timeout for dsts in dsts_sets]) + 3
 			for i in range(self.n_rounds):
+				srci=0
 				for src, dsts in zip(srcs,dsts_sets):
 					np.random.shuffle(dsts)
-					with open(target_fn,'w') as f:
+					with open(target_fn + str(srci),'w') as f:
 						for targ in dsts:
 							f.write(targ + "\n")
-					cmd = "cat {} | {} -s {} -r {} -i {} &".format(target_fn, 
+					cmd = "cat {} | {} -s {} -r {} -i {} &".format(target_fn + str(srci), 
 						PINGER, src, self.rate_limit, OUR_PING_ID + i) 
 					print(cmd)
 					call(cmd, shell=True)
+					srci += 1
 				print("Sleeping {} seconds between probing rounds".format(n_s_per_round))
 				time.sleep(n_s_per_round)
 			# Wait for tcpdump to finish writing
@@ -88,48 +135,32 @@ class Pinger_Wrapper:
 			## get rid of any iptable rules that survived
 			for src, tap in zip(srcs,taps):
 				self.remove_iptable(src, tap)
-			call("rm {}".format(target_fn), shell=True)
+			call("rm {}*".format(target_fn), shell=True)
 
-		meas_ret = {src: {dst: [{'pop': None, 't_start': None, 't_end': None, 'rtt': None} for _ in \
-				range(self.n_rounds)] for dst in dsts} for src,dsts in zip(srcs,dsts_sets)}
+
+		meas_ret = {src: {} for src in srcs}
 		_id_to_meas_i = {OUR_PING_ID+i:i for i in range(self.n_rounds)}
 		srcsdict = {src:None for src in srcs}
-		for pop in tqdm.tqdm(self.pops, desc="Parsing ping results."):
-			for row in open(pop_to_outfn(pop), 'r'):
-				# parse the measurements
-				try:
-					if "request" in row:
-						rowre = re.search("(.+) IP (.+) \> (.+)\: ICMP echo request\, id (.+)\, seq", row)
-						t,src,dst,_id = rowre.group(1), rowre.group(2), rowre.group(3),rowre.group(4).strip()
-						which = 'start'
-					elif "reply" in row: # ping reply to us
-						rowre = re.search("(.+) IP (.+) \> (.+)\: ICMP echo reply\, id (.+)\, seq", row)
-						t,dst,src,_id = rowre.group(1), rowre.group(2), rowre.group(3),rowre.group(4).strip()
-						which = 'end'
-					else:
-						continue
-				except AttributeError: # invalid line
-					continue
-				try:
-					srcsdict[src]
-				except KeyError:
-					# not a ping from our program
-					continue
-				try:
-					meas_ret[src][dst] # not a dst we're tracking, random noise
-				except KeyError:
-					continue
-				_id = int(_id)
-				try:
-					this_dst_meas_i = _id_to_meas_i[_id]
-				except KeyError:
-					# not a dst we're tracking, random noise
-					continue
-				t = datetime.datetime.strptime(t, '%H:%M:%S.%f').timestamp()
-				meas_ret[src][dst][this_dst_meas_i]["t_" + which] = float(t)
-				if which == 'end':
-					meas_ret[src][dst][this_dst_meas_i]['pop'] = pop
-				meas_ret[src][dst][this_dst_meas_i][which + 'pop'] = pop
+		dstsdict = {dst:None for dstset in dsts_sets for dst in dstset}
+		# Parse all the logs
+		print("Parsing tcpdump logs")
+		pop_jobs = [(pop,copy.copy(meas_ret), copy.copy(_id_to_meas_i), copy.copy(srcsdict), copy.copy(dstsdict), ) for pop in self.pops]
+		ppool = multiprocessing.Pool(processes=16)
+		rets = ppool.map(parse_ping_results,  pop_jobs)
+		ppool.close()
+		print("Combining rets from workers")
+		for ret in rets: # little complicated to combine
+			for src in ret:
+				for dst in ret[src]:
+					for i,meas in enumerate(ret[src][dst]):
+						for k in meas:
+							if meas[k] is not None:
+								try:
+									meas_ret[src][dst]
+								except KeyError:
+									meas_ret[src][dst] = [{'pop': None, 't_start': None, 't_end': None, 'rtt': None} for _ in \
+										range(self.n_rounds)]
+								meas_ret[src][dst][i][k] = ret[src][dst][i][k]
 
 		for src in meas_ret:
 			for dst in meas_ret[src]:
@@ -137,8 +168,8 @@ class Pinger_Wrapper:
 					if meas['t_start'] is not None and meas['t_end'] is not None \
 					 and meas['t_end'] - meas['t_start'] > 0:
 						meas['rtt'] = meas['t_end'] - meas['t_start']
-					elif meas['t_end'] is not None:
-						print("Weirdness --- reply but no request from {}".format(dst))
+					# elif meas['t_end'] is not None:
+					# 	print("Weirdness --- reply but no request from {}".format(dst))
 		if kwargs.get('remove_bad_meas'):
 			for src in meas_ret:
 				for dst, meas in meas_ret[src].items():
