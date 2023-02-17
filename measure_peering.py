@@ -300,10 +300,14 @@ class Peering_Pinger():
 		## get rid of these candidates since they're annoying
 		self.dst_to_ug = {}
 		self.ug_to_vol = {}
-		ug_to_loc = {}
+		ug_to_loc,ug_to_vol = {}, {}
 		for d in msft_data_d:
 			ug = (d['metro'],d['asn'])
 			ug_to_loc[ug] = (float(d['lat']), float(d['lon']))
+			try:
+				ug_to_vol[ug] += float(d['N'])
+			except KeyError:
+				ug_to_vol[ug] = float(d['N'])
 			if d['reachable_addr'] != "":
 				self.dst_to_ug[d['reachable_addr']] = ug
 				self.dst_to_ug[ip32_to_24(d['reachable_addr'])] = ug
@@ -338,10 +342,10 @@ class Peering_Pinger():
 			except KeyError:
 				pass
 		print("{} UGs thus far respond to ping".format(len(ugs_in_ping)))
-		ug_locs = list(set([ug_to_loc[ug] for ug in ugs_in_ping]))
-		with open(os.path.join(CACHE_DIR, 'used_ug_locs.csv'), 'w') as f:
-			for lat,lon in ug_locs:
-				f.write("{},{}\n".format(lat,lon))
+		with open(os.path.join(CACHE_DIR, '{}_used_ug_locs.csv'.format(self.system)), 'w') as f:
+			for ug in ug_to_loc:
+				lat,lon = ug_to_loc[ug]
+				f.write("{},{},{}\n".format(lat,lon,ug_to_vol[ug]))
 		self.default_ip = ni.ifaddresses('eth0')[ni.AF_INET][0]['addr']
 		exit(0)
 		### Get AS to org mapping and vice versa for compatibility with PAINTER pipeline
