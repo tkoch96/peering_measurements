@@ -178,7 +178,7 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 					continue
 				my_anycast_latencies[ip,pop] = np.maximum(float(lat) * 1000,1)
 		jc_ip_catchments = {}
-		for row in open(os.path.join(CACHE_DIR, 'jc_{}_anycast_catchment.csv'),'r'):
+		for row in open(os.path.join(CACHE_DIR, 'jc_{}_anycast_catchment.csv'.format(self.system)),'r'):
 			ip,catchment = row.strip().split('\t')
 			jc_ip_catchments[ip] = catchment
 		jc_anycast_latencies = {}
@@ -193,10 +193,10 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			jc_anycast_latencies[ip,jc_ip_catchments[ip]] = lat
 		ips_in_both = get_intersection(my_anycast_latencies,jc_anycast_latencies)
 		print("Comparing {} IPs".format(len(ips_in_both)))
-		diffs = list([(my_anycast_latencies[ip] - jc_anycast_latencies[ip])/my_anycast_latencies[ip] for ip in ips_in_both])
+		diffs = list([my_anycast_latencies[ip] - jc_anycast_latencies[ip]for ip in ips_in_both])
 		x,cdf_x = get_cdf_xy(diffs)
 		plt.plot(x,cdf_x)
-		plt.xlim([-2,2])
+		plt.xlim([-40,40])
 		plt.xlabel("My - JC Anycast Lat (ms)")
 		plt.ylabel("CDF of Targets")
 		plt.grid(True)
