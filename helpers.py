@@ -5,8 +5,256 @@ from bisect import bisect_left
 from config import *
 
 
+
+
 ### This file contains helper functions. I use these helper functions in all my projects
 ### so some of them might be irrelevant.
+
+
+def single_process_parse(args, **kwargs):
+	fn,lines,worker_n, = args
+	print("Parsing results in worker : {}".format(worker_n))
+	results = {'meas_by_ip': {}, 'meas_by_popp': {}}
+	i=0
+	for row in open(fn,'r'):
+		i += 1
+		if i <= lines[0]:
+			continue
+		if i >= lines[1]:
+			continue 
+		_,ip,pop,peer,lat = row.strip().split(',')
+		lat = np.maximum(float(lat) * 1000,1)
+		popp = (pop,peer)
+		try:
+			results['meas_by_ip'][ip]
+		except KeyError:
+			results['meas_by_ip'][ip] = {}
+		results['meas_by_ip'][ip][popp] = lat
+		try:
+			results['meas_by_popp'][popp].append(ip)
+		except KeyError:
+			results['meas_by_popp'][popp] = [ip]
+		if np.random.random() > .99999:break
+	print("Done parsing results in worker : {}".format(worker_n))
+	return results
+
+def parse_ingress_latencies_mp(fn):
+	import multiprocessing
+	n_workers = np.minimum(multiprocessing.cpu_count(), np.maximum(8, multiprocessing.cpu_count() // 2))
+	ppool = multiprocessing.Pool(processes=n_workers)
+
+	n_lines = int(check_output("wc -l {}".format(fn), shell=True).decode().split(" ")[0])
+	n_lines_per_worker = int(np.ceil(n_lines / n_workers))
+	args = []
+	for worker_n in range(n_workers):
+		args.append((fn,(n_lines_per_worker*worker_n,n_lines_per_worker*(worker_n+1)),worker_n,))
+
+	results = ppool.map(single_process_parse, args)
+	ppool.close()
+
+	all_meas_by_ip, all_meas_by_popp = {}, {}
+	for res in results:
+		meas_by_popp, meas_by_ip = res['meas_by_popp'], res['meas_by_ip']
+		for popp in meas_by_popp:
+			try:
+				all_meas_by_popp[popp] = all_meas_by_popp[popp].union(meas_by_popp[popp])
+			except KeyError:
+				all_meas_by_popp[popp] = set(meas_by_popp[popp])
+		for ip in meas_by_ip:
+			try:
+				all_meas_by_ip[ip]
+			except KeyError:
+				all_meas_by_ip[ip] = {}
+			for popp in meas_by_ip[ip]:
+				all_meas_by_ip[ip][popp] = meas_by_ip[ip][popp]
+	for popp in all_meas_by_popp:
+		all_meas_by_popp[popp] = list(all_meas_by_popp[popp])
+	return {'meas_by_popp': all_meas_by_popp, 'meas_by_ip': all_meas_by_ip}
+
+
+def check_ping_responsive(ips, use_file=False, ret_ping=False,tmpoutfn='tmp.warts'):
+	ret = []
+	out_fn = tmpoutfn
+	if use_file:
+		# ips is the file name
+		scamp_cmd = 'sudo scamper -O warts -c "ping -c 1" -p 10000 -M tak2154atcolumbiadotedu'\
+			' -l peering_interfaces -o {} -f {}'.format(out_fn, ips)
+		try:
+			check_output(scamp_cmd, shell=True)
+			cmd = "sc_warts2json {}".format(out_fn)
+			out = check_output(cmd, shell=True).decode()
+			for meas_str in out.split('\n'):
+				if meas_str == "": continue
+				measurement_obj = json.loads(meas_str)
+				meas_type = measurement_obj['type']
+				if meas_type == 'ping':
+					dst = measurement_obj['dst']
+					if measurement_obj['responses'] != []:
+						if ret_ping:
+							ret.append(measurement_obj)
+						else:
+							ret.append(dst)
+		except:
+			# likely bad input
+			import traceback
+			traceback.print_exc()
+			pass
+	else:
+		n_chunks = len(ips) // 1000 + 1
+		ip_chunks = split_seq(ips,n_chunks)
+		for ip_chunk in ip_chunks:
+			addresses_str = " ".join(ip_chunk)
+			if addresses_str != "":
+				scamp_cmd = 'sudo scamper -O warts -c "ping -c 1" -p 8000 -M tak2154atcolumbiadotedu'\
+					' -l peering_interfaces -o {} -i {}'.format(out_fn, addresses_str)
+				try:
+					check_output(scamp_cmd, shell=True)
+					cmd = "sc_warts2json {}".format(out_fn)
+					out = check_output(cmd, shell=True).decode()
+					for meas_str in out.split('\n'):
+						if meas_str == "": continue
+						measurement_obj = json.loads(meas_str)
+						meas_type = measurement_obj['type']
+						if meas_type == 'ping':
+							dst = measurement_obj['dst']
+							if measurement_obj['responses'] != []:
+								if ret_ping:
+									ret.append(measurement_obj)
+								else:
+									ret.append(dst)
+				except:
+					# likely bad input
+					import traceback
+					traceback.print_exc()
+					pass
+	return ret
+
+def load_bgp_paths_ping_campaign(fn,load_workers=True, **kwargs):
+	ret = {}
+	for row in open(fn,'r'):
+		try:
+			asn,fe,peer_str = row.strip().split('\t')
+		except ValueError:
+			asn,fe = row.strip().split('\t')
+			peer_str = ""
+		if asn == "None" or asn == "NA": continue
+		if int(asn) >= 1e6: asn = int(asn)
+		peers = []
+		if peer_str != "":
+			for peer in peer_str.split('-'):
+				if int(peer) >= 1e6:
+					peers.append(int(peer))
+				else:
+					peers.append(peer)
+		try:
+			ret[asn,fe] += peers
+		except KeyError:
+			ret[asn,fe] = peers
+		ret[asn,fe] = list(set(ret[asn,fe]))
+	if load_workers:
+		from subprocess import call
+		import glob
+		for wfn in glob.glob(fn + "*tmp"):
+			this_ret = load_bgp_paths_ping_campaign(wfn,load_workers=False)
+			for (asn,fe), peers in this_ret.items():
+				try:
+					ret[asn,fe] += peers
+				except KeyError:
+					ret[asn,fe] = peers
+				ret[asn,fe] = list(set(ret[asn,fe]))
+			call("rm {}".format(wfn),shell=True)
+		with open(fn, 'w') as f:
+			for (asn,fe), peers in ret.items():
+				peers = [str(el) for el in peers]
+				peer_str = "-".join(peers)
+				f.write("{}\t{}\t{}\n".format(str(asn), fe, peer_str))
+	return ret
+
+def save_vf_bgp_peers_paths(obj, fn, save_paths, **kwargs):
+	# Saves valid BGP peers/paths to file
+	# columns are either asn,fe,peers,paths or asn,peers,paths
+	write_mode = kwargs.get('write_mode', 'a')
+	with open(fn,write_mode) as f:
+		for k in obj:
+			peers = []
+			for peer in obj[k]['peers']:
+				if type(peer) == tuple:
+					peers.append(str(peer[0]) + "," + str(peer[1]))
+				else:
+					peers.append(str(peer))
+			peers = list(set(peers))
+			peers_str = "-".join(peers)
+			if save_paths:
+				paths = obj[k]['paths']
+				paths_str = ""
+				for path in paths:
+					paths_str += (";" + "-".join([str(el) for el in path]))
+			else:
+				paths_str = ""
+			if type(k) == tuple:
+				f.write("{}\t{}\t{}\t{}\n".format(k[0],k[1],peers_str,paths_str))
+			else:
+				f.write("{}\t{}\t{}\n".format(k,peers_str,paths_str))
+
+def calc_vf(args):
+	"""Calculates valley free paths to Microsoft. Meant to be used in a worker thread."""
+	msft_org, as_rel, all_asns, settings, worker_n = args
+	cache_fn = settings.get('cache_fn')
+	save_paths = settings.get('save_paths', False) # could bloat memory
+	if os.path.exists(cache_fn): # cache VF paths since the calcs are expensive
+		ret = load_bgp_paths_ping_campaign(cache_fn, load_workers=False)
+		ret = {k:{'peers': v, 'paths': None} for k,v in ret.items()}
+	else:
+		ret = {}
+	# Calculate valley free paths
+	from mybgpsim import MyBGPSim
+	s = MyBGPSim(msft_org)
+	s.load_graph(as_rel)
+	t_s_calc = time.time()
+
+	for i,asn in enumerate(all_asns):
+		if asn in ret: continue
+		if type(asn) == tuple:
+			if len(asn) == 3:
+				asn,pop,_ = asn
+			else:
+				asn,pop = asn
+		else:
+			pop = None
+		if len([el for el in as_rel if el[0] == asn or el[1] == asn]) > 0:
+			if i % 10 == 0 and i > 0:
+				t_per_iter = (time.time() - t_s_calc) / i
+				t_left = (len(all_asns) - i) * t_per_iter / 3600.0
+				print("{} percent done, {} hours remaining in worker {}".format(i*100.0/len(all_asns), round(t_left,2), worker_n))					
+			paths, peers = [], []
+			# even if we're targeting a FE, just calculate for all FE (since its not much harder)
+			# and then prune later
+			for path in s.get_vf_paths([asn]): 
+				peer = path[-2]
+				peers.append(peer)
+				paths.append(path)
+		else:
+			peers = []
+			paths = []	
+		if pop is not None:
+			asn = (asn,pop)
+
+		ret[asn] = {
+			"peers": peers,
+		}
+		if save_paths:
+			# Can bloat memory
+			ret[asn]['paths'] = paths
+
+		if np.random.random() > .9:
+			# save periodically just in case
+			out_fn = cache_fn + str(worker_n) + "-tmp"
+			save_vf_bgp_peers_paths(ret, out_fn, save_paths)
+			ret = {}
+			
+	print("Done in worker {}".format(worker_n))
+
+	return ret
 
 def haversine(loc1,loc2):
 	"""
@@ -130,6 +378,7 @@ def get_ip_loc(ip_addr, ip_to_loc, reader, tolerance=500):
 		ip_to_loc[ip_addr] = "?"
 
 	return ip_to_loc
+
 def multi_max(arr):
 	"""Arr is a dict k->N, where N is the number of k. Returns key(s) with max number."""
 	ks = list(arr.keys())

@@ -795,7 +795,7 @@ class Peering_Pinger():
 			providers = list(set(providers))
 			provider_popps = list(set([popp for pref in self.network_to_popp for popp in self.network_to_popp[pref]
 				if popp[1] in providers]))
-			with open(os.path.join(CACHE_DIR, 'provider_popps.csv'),'w') as f:
+			with open(os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system)),'w') as f:
 				for pop,peer in provider_popps:
 					f.write("{},{}\n".format(pop,peer))
 			for ntwrk in self.network_to_popp:
@@ -826,7 +826,7 @@ class Peering_Pinger():
 		self.popp_to_clients = {}
 		self.client_to_popps = {}
 		provider_popps = []
-		for row in open(os.path.join(CACHE_DIR, 'provider_popps.csv'),'r'):
+		for row in open(os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system)),'r'):
 			provider_popps.append(tuple(row.strip().split(',')))
 		for row in tqdm.tqdm(open(client_to_popps_fn, 'r'),desc="Loading client to popps."):
 			client, popps_str = row.strip().split(',')
@@ -882,7 +882,7 @@ class Peering_Pinger():
 	def measure_prepainter(self):
 		""" Conducts anycast measurements and per-ingress measurements, for input into a PAINTER calculation."""
 		
-		anycast_latencies = self.load_anycast_latencies()
+		anycast_latencies = {}#self.load_anycast_latencies()
 		every_client_of_interest = self.get_reachable_clients()
 		every_client_of_interest = self.get_condensed_targets(every_client_of_interest)
 		print("Every client of interest includes {} addresses".format(len(every_client_of_interest)))
@@ -965,6 +965,7 @@ class Peering_Pinger():
 			srcs_set = [pref_to_ip(pref) for pref in self.available_prefixes]
 			pw = Pinger_Wrapper(self.pops, self.pop_to_intf)
 			pw.n_rounds = 7
+			pw.rate_limit = 1000 # rate limit by a lot more since we expect tons of responses
 
 			for adv_round_i in range(n_adv_rounds):
 				taps_set = []

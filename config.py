@@ -2,6 +2,12 @@ CACHE_DIR  = "cache"
 DATA_DIR = "data"
 TMP_DIR = 'tmp'
 
+# AS relationships
+C_TO_P = 1
+P_TO_C = -1
+P_TO_P = 0
+S_TO_S = 5
+
 POP_TO_LOC = {
 	'peering':{
 		'amsterdam01': (52.359,4.933),
