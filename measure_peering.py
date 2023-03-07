@@ -5,6 +5,7 @@ from subprocess import call, check_output
 import subprocess
 
 from pinger_wrapper import Pinger_Wrapper
+from generic_measurement_utils import AS_Utils_Wrapper
 
 
 CAREFUL = False
@@ -17,32 +18,31 @@ def ip32_to_24(ip):
 def check_ping_responsive(ips):
 	print("Checking responsiveness for {} IP addresses".format(len(ips)))
 	ret = []
-	max_l_seq = 3000
-	n_chunks = int(np.ceil(len(ips) / max_l_seq))
-	ip_chunks = split_seq(ips,n_chunks)
-	for ips in ip_chunks:
-		addresses_str = " ".join(ips)
-		if addresses_str != "":
-			out_fn = 'tmp.warts'
-			scamp_cmd = 'sudo scamper -O warts -c "ping -c 1" -p 8000 -M tak2154atcolumbiadotedu'\
-				' -l peering_interfaces -o {} -i {}'.format(out_fn, addresses_str)
-			try:
-				check_output(scamp_cmd, shell=True)
-				cmd = "sc_warts2json {}".format(out_fn)
-				out = check_output(cmd, shell=True).decode()
-				for meas_str in out.split('\n'):
-					if meas_str == "": continue
-					measurement_obj = json.loads(meas_str)
-					meas_type = measurement_obj['type']
-					if meas_type == 'ping':
-						dst = measurement_obj['dst']
-						if measurement_obj['responses'] != []:
-							ret.append(dst)
-			except:
-				# likely bad input
-				import traceback
-				traceback.print_exc()
-				pass
+	if len(ips) == 0: return ret
+	with open('targets.txt','w') as f:
+		for ip in ips:
+			f.write(ip + "\n")
+
+	out_fn = 'tmp.warts'
+	scamp_cmd = 'sudo scamper -O warts -c "ping -c 1" -p 8000 -M tak2154atcolumbiadotedu'\
+		' -l peering_interfaces -o {} -f targets.txt -p 10000'.format(out_fn)
+	try:
+		check_output(scamp_cmd, shell=True)
+		cmd = "sc_warts2json {}".format(out_fn)
+		out = check_output(cmd, shell=True).decode()
+		for meas_str in out.split('\n'):
+			if meas_str == "": continue
+			measurement_obj = json.loads(meas_str)
+			meas_type = measurement_obj['type']
+			if meas_type == 'ping':
+				dst = measurement_obj['dst']
+				if measurement_obj['responses'] != []:
+					ret.append(dst)
+	except:
+		# likely bad input
+		import traceback
+		traceback.print_exc()
+		pass
 	return ret
 
 def measure_latency_ips(ips):
@@ -105,10 +105,14 @@ class Peering_Pinger():
 			'conduct_painter': self.conduct_painter, # conducts painter-calculated advertisement
 			'conduct_oneperpop': self.conduct_oneperpop, # conducts one advertisement per pop
 			'conduct_oneperpop_reuse': self.conduct_oneperpop_reuse, # conducts one advertisement per pop, but reuses far away
+			'find_needed_pingable_targets': self.find_needed_pingable_targets, # pings everything to see if we can find responsive addresses
 		}[mode]
 
 		assert system in ["peering", "vultr"]
 		self.system = system
+
+		self.utils = AS_Utils_Wrapper()
+		self.utils.update_cc_cache()
 
 		all_muxes_str = check_output("sudo client/peering openvpn status", shell=True).decode().split('\n')
 		if self.system == "peering":
@@ -164,6 +168,7 @@ class Peering_Pinger():
 			except KeyError:
 				self.peer_macs[pop] = {}
 
+		self.popps = []
 		for row in popps:
 			if self.system == "peering":
 				pop, peer, session_id = row["BGP Mux"], row["Peer ASN"], row["Session ID"]
@@ -180,6 +185,7 @@ class Peering_Pinger():
 				# print("Warning -- multiple session ID's for {} {}".format(pop,peer))
 			except KeyError:
 				self.peer_to_id[pop,peer] = session_id
+			self.popps.append((pop,peer))
 		for pop in self.peers:
 			self.peers[pop] = list(set(self.peers[pop])) # remove dups
 
@@ -252,29 +258,32 @@ class Peering_Pinger():
 				self.multipop_clients.append(client)
 
 		## perhaps reachable addresses for clients
+		ip_ug_d = list(csv.DictReader(open(os.path.join(DATA_DIR, 'client24_metro_vol_20220620.csv'),'r')))
+		self.dst_to_ug = {row['client_24']: (row['metro'], row['asn']) for row in ip_ug_d}
+		self.ug_to_vol = {}
+		for row in ip_ug_d:
+			ug = self.dst_to_ug[row['client_24']]
+			try:
+				self.ug_to_vol[ug] += float(row['N'])
+			except KeyError:
+				self.ug_to_vol[ug] = float(row['N'])
 		# reachable_addr_metro_asn.kql, 5 days
 		msft_data_d = list(csv.DictReader(open(os.path.join(DATA_DIR, 'reachable_addr_metro_asn_5d.csv'),'r')))
 		self.all_client_addresses_from_msft = set([row['reachable_addr'] for row in msft_data_d \
 			if ":" not in row['reachable_addr'] and row['reachable_addr'] != ''])
 		print("{} UGs in kusto data".format(len(set((row['metro'], row['asn']) for row in msft_data_d))))
 		## get rid of these candidates since they're annoying
-		self.dst_to_ug = {}
-		self.ug_to_vol = {}
-		ug_to_loc,ug_to_vol = {}, {}
-		for d in msft_data_d:
-			ug = (d['metro'],d['asn'])
-			ug_to_loc[ug] = (float(d['lat']), float(d['lon']))
+		ug_to_loc = {}
+		for row in msft_data_d:
+			ug = (row['metro'],row['asn'])
+			ug_to_loc[ug] = (float(row['lat']), float(row['lon']))
+			if row['reachable_addr'] != "":
+				self.dst_to_ug[row['reachable_addr']] = ug
+				self.dst_to_ug[ip32_to_24(row['reachable_addr'])] = ug
 			try:
-				ug_to_vol[ug] += float(d['N'])
+				self.ug_to_vol[ug] += float(row['N'])
 			except KeyError:
-				ug_to_vol[ug] = float(d['N'])
-			if d['reachable_addr'] != "":
-				self.dst_to_ug[d['reachable_addr']] = ug
-				self.dst_to_ug[ip32_to_24(d['reachable_addr'])] = ug
-			try:
-				self.ug_to_vol[ug] += float(d['N'])
-			except KeyError:
-				self.ug_to_vol[ug] = float(d['N'])
+				self.ug_to_vol[ug] = float(row['N'])
 		for fn in glob.glob(os.path.join(DATA_DIR, "hitlist_from_jiangchen", "*")):
 			these_ips = set([row.strip() for row in open(fn,'r').readlines()])
 			self.all_client_addresses_from_msft = self.all_client_addresses_from_msft.union(these_ips)
@@ -306,7 +315,7 @@ class Peering_Pinger():
 		with open(os.path.join(CACHE_DIR, '{}_used_ug_locs.csv'.format(self.system)), 'w') as f:
 			for ug in ug_to_loc:
 				lat,lon = ug_to_loc[ug]
-				f.write("{},{},{}\n".format(lat,lon,ug_to_vol[ug]))
+				f.write("{},{},{}\n".format(lat,lon,self.ug_to_vol[ug]))
 		self.default_ip = ni.ifaddresses('eth0')[ni.AF_INET][0]['addr']
 		### Get AS to org mapping and vice versa for compatibility with PAINTER pipeline
 		peer_to_org_fn = os.path.join(CACHE_DIR, 'vultr_peer_to_org.csv')
@@ -324,8 +333,6 @@ class Peering_Pinger():
 			self.peer_to_org[peer] = org
 		for org in self.org_to_peer:
 			self.org_to_peer[org] = list(set(self.org_to_peer[org]))
-
-		self.check_construct_client_to_peer_mapping()
 
 		self.maximum_inflation = kwargs.get('maximum_inflation', 1)
 
@@ -502,7 +509,8 @@ class Peering_Pinger():
 		## While scrolling through IP addresses, favor the ones that we have anycast latency for
 		anycast_latency = self.load_anycast_latencies()
 		favored_ips = [ip for ip,lat in anycast_latency.items() if lat != -1]
-		ips = get_intersection(favored_ips,ips) + get_difference(ips,favored_ips)
+		no_anycast = get_difference(ips,favored_ips)
+		ips = get_intersection(favored_ips,ips) + no_anycast
 
 		ip_ug_d = list(csv.DictReader(open(os.path.join(DATA_DIR, 'client24_metro_vol_20220620.csv'),'r')))
 		ip_to_ug = {row['client_24']: (row['metro'], row['asn']) for row in ip_ug_d}
@@ -512,21 +520,9 @@ class Peering_Pinger():
 		for ip in tqdm.tqdm(ips, desc="Condensing targets..."):
 			ntwrk = ip32_to_24(ip)
 			try:
-				ug = ip_to_ug[ntwrk]
+				used_ugs[ntwrk]
 			except KeyError:
-				ret.append(ip)
-				continue
-			if ug[1] is None or ug[0] is None:
-				ret.append(ip)
-				continue
-			if 'unknown' in ug[0].lower():
-				ret.append(ip)
-				continue
-			try:
-				used_ugs[ug]
-				continue
-			except KeyError:
-				used_ugs[ug] = None
+				used_ugs[ntwrk] = None
 				ret.append(ip)
 		print("Condensed {} targets to {} targets.".format(len(ips), len(ret)))
 		return ret
@@ -800,7 +796,7 @@ class Peering_Pinger():
 					f.write("{},{}\n".format(pop,peer))
 			for ntwrk in self.network_to_popp:
 				self.network_to_popp[ntwrk] = list(set(self.network_to_popp[ntwrk]))
-			clients = self.all_client_addresses_from_msft
+			clients = self.get_reachable_clients()
 			with open(client_to_popps_fn ,'w') as f:
 				for client in clients:
 					ntwrk = self.network_to_popp.get_key(client)
@@ -838,8 +834,35 @@ class Peering_Pinger():
 					self.popp_to_clients[popp].append(client)
 				except KeyError:
 					self.popp_to_clients[popp] = [client]
+
+		### Also look in the customer cone of all the peers, since we don't get all routes
+		### Then we can be confident CCs don't overlap to the extent that our CC data is complete
+		every_address = list(self.client_to_popps)
+		asn_to_ip = {}
+		for addr in every_address:
+			asn = self.utils.parse_asn(addr)
+			if asn is None:continue
+			try:
+				asn_to_ip[asn].append(addr)
+			except KeyError:
+				asn_to_ip[asn] = [addr]
+		self.utils.check_load_ip_to_asn()
+		self.utils.lookup_asns_if_needed(list(set([ip32_to_24(ip) for ip in every_address])))
+		for popp in self.popps:
+			peer = self.utils.parse_asn(popp[1])
+			try:
+				self.popp_to_clients[popp]
+			except KeyError:
+				self.popp_to_clients[popp] = []
+			for asn in self.utils.get_cc(peer):
+				self.popp_to_clients[popp] += asn_to_ip.get(asn,[])
+		to_del = [popp for popp in self.popps if len(self.popp_to_clients[popp]) == 0]
+		for popp in to_del:
+			del self.popp_to_clients[popp]
+
+
 		for popp in provider_popps:
-			self.popp_to_clients[popp] = list(self.client_to_popps)
+			self.popp_to_clients[popp] = every_address
 		self.network_to_popp = pytricia.PyTricia()
 		for row in open(network_to_popps_fn, 'r'):
 			network, popps_str = row.strip().split(',')
@@ -882,7 +905,8 @@ class Peering_Pinger():
 	def measure_prepainter(self):
 		""" Conducts anycast measurements and per-ingress measurements, for input into a PAINTER calculation."""
 		
-		anycast_latencies = {}#self.load_anycast_latencies()
+		self.check_construct_client_to_peer_mapping()
+		anycast_latencies = self.load_anycast_latencies()
 		every_client_of_interest = self.get_reachable_clients()
 		every_client_of_interest = self.get_condensed_targets(every_client_of_interest)
 		print("Every client of interest includes {} addresses".format(len(every_client_of_interest)))
@@ -1073,8 +1097,8 @@ class Peering_Pinger():
 						for popp in popps_set[adv_set_i]:
 							## Get any client who we know can route through these ingresses
 							these_clients = these_clients.union(self.popp_to_clients[popp])
-							## Then add it all relatively close clients
-							these_clients = these_clients.union(self.pop_to_close_clients(popp[0]))
+							# ## Then add it all relatively close clients
+							# these_clients = these_clients.union(self.pop_to_close_clients(popp[0]))
 						these_clients = get_intersection(these_clients, every_client_of_interest)
 						clients_set.append(list(these_clients))
 					except IndexError:
@@ -1138,6 +1162,7 @@ class Peering_Pinger():
 		# conduct the advertisement
 		# measure from every user
 		# save perfs
+		self.check_construct_client_to_peer_mapping()
 
 		def get_advs_by_budget(ranked_advs):
 			# ranked advs is a dict budget -> all advertisements up to budget
@@ -1254,6 +1279,8 @@ class Peering_Pinger():
 
 	def conduct_oneperpop(self):
 		"""Conducts advertisement with one prefix per PoP, assesses latency."""
+		self.check_construct_client_to_peer_mapping()
+		
 		lat_fn = os.path.join(CACHE_DIR, "{}_oneperpop_adv_latencies.csv".format(self.system))
 		anycast_latencies = self.load_anycast_latencies()
 		every_client_of_interest = self.get_reachable_clients()
@@ -1309,6 +1336,8 @@ class Peering_Pinger():
 
 	def conduct_oneperpop_reuse(self):
 		"""Conducts advertisement with one prefix per PoP with reuse across distant PoPs, assesses latency."""
+		self.check_construct_client_to_peer_mapping()
+
 		MI = int(self.maximum_inflation)
 		lat_fn = os.path.join(CACHE_DIR, "{}_oneperpop_reuse_{}_adv_latencies.csv".format(self.system, MI))
 		anycast_latencies = self.load_anycast_latencies()
@@ -1405,6 +1434,32 @@ class Peering_Pinger():
 			for pop_set,pref in zip(these_pop_sets,pref_set):
 				for pop in pop_set:
 					self.withdraw_from_pop(pop, pref)
+
+	def find_needed_pingable_targets(self):
+		import ipaddress
+		all_targs_to_probe = {}
+		for row in tqdm.tqdm(open(os.path.join(CACHE_DIR, 'possible_pref_targets_by_peer.csv'),'r'),
+			desc="Parsing prefixes to probe"):
+			peer, prefs = row.strip().split(',')
+			prefs = prefs.split('-')
+			np.random.shuffle(prefs)
+			all_targs_to_probe[peer] = []
+			for pref in prefs[0:5]:
+				if pref.strip() == "": continue
+				pref,preflength = pref.split("/")
+				ipnum = dotted_quad_to_num(pref)
+				n_addr = 2**(32 - int(preflength)) - 2
+				if n_addr <= 0:
+					continue
+				rand_hosts = np.random.choice(np.arange(n_addr), size=np.minimum(n_addr,256),replace=False)
+				hosts = list([ipnum+1+i for i in rand_hosts])
+				hosts = ['.'.join([str(ipint >> (i << 3) & 0xFF)
+          			for i in range(4)[::-1]]) for ipint in hosts]
+				all_targs_to_probe[peer] += hosts
+		all_peers_targs_to_probe = list(set([el for hosts in all_targs_to_probe.values() for el in hosts]))
+		self.all_client_addresses_from_msft = self.all_client_addresses_from_msft + all_peers_targs_to_probe
+		self.all_client_addresses_from_msft = list(set(self.all_client_addresses_from_msft))
+		self.get_reachable_clients()
 
 	def calculate_latency(self):
 		# # Get latency from VM to clients
@@ -1525,9 +1580,9 @@ class Peering_Pinger():
 		already_know_responsiveness = self.addresses_that_respond_to_ping[0] + self.addresses_that_respond_to_ping[1]
 		dont_know_responsiveness = get_difference(dsts, already_know_responsiveness)
 		if len(dont_know_responsiveness) > 0:
-			responsive_dsts = check_ping_responsive(dont_know_responsiveness) + get_intersection(dsts, self.addresses_that_respond_to_ping[1])
+			responsive_dsts = check_ping_responsive(dont_know_responsiveness) + self.addresses_that_respond_to_ping[1]
 		else:
-			responsive_dsts = get_intersection(dsts, self.addresses_that_respond_to_ping[1])
+			responsive_dsts = self.addresses_that_respond_to_ping[1]
 		responsive_dsts = list(set(responsive_dsts))
 		self.addresses_that_respond_to_ping[1] += get_intersection(dsts, responsive_dsts)
 		self.addresses_that_respond_to_ping[0] += get_difference(dont_know_responsiveness, responsive_dsts)
@@ -1550,7 +1605,7 @@ if __name__ == "__main__":
 	parser.add_argument("--mode", default="calculate_latency",
 		choices=['calculate_latency','pairwise_preferences','quickvultrtesting',
 		'measure_prepainter', 'conduct_painter', 'conduct_oneperpop',
-		'conduct_oneperpop_reuse'])
+		'conduct_oneperpop_reuse', 'find_needed_pingable_targets'])
 	parser.add_argument('--system', required=True, 
 		choices=['peering','vultr'],help="Are you using PEERING or VULTR?")
 	parser.add_argument('--maximum_inflation', required=False,

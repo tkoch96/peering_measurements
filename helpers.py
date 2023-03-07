@@ -34,13 +34,26 @@ def single_process_parse(args, **kwargs):
 			results['meas_by_popp'][popp].append(ip)
 		except KeyError:
 			results['meas_by_popp'][popp] = [ip]
-		if np.random.random() > .99999:break
 	print("Done parsing results in worker : {}".format(worker_n))
-	return results
+
+	meas_by_ip_fn = os.path.join(TMP_DIR, 'meas_by_ip-{}.csv'.format(worker_n))
+	with open(meas_by_ip_fn, 'w') as f:
+		for ip in results['meas_by_ip']:
+			thisipstr = ""
+			for popp,lat in results['meas_by_ip'][ip].items():
+				thisipstr += "{}-{}-{},".format(popp[0],popp[1],lat)
+			f.write("{},{}\n".format(ip,thisipstr))
+	meas_by_popp_fn = os.path.join(TMP_DIR, 'meas_by_popp-{}.csv'.format(worker_n))
+	with open(meas_by_popp_fn,'w') as f:
+		for popp in results['meas_by_popp']:
+			ips_str = "-".join(results['meas_by_popp'][popp])
+			f.write("{},{},{}\n".format(popp[0],popp[1],ips_str))
+
+	return True
 
 def parse_ingress_latencies_mp(fn):
 	import multiprocessing
-	n_workers = np.minimum(multiprocessing.cpu_count(), np.maximum(8, multiprocessing.cpu_count() // 2))
+	n_workers = np.minimum(multiprocessing.cpu_count(), 8)
 	ppool = multiprocessing.Pool(processes=n_workers)
 
 	n_lines = int(check_output("wc -l {}".format(fn), shell=True).decode().split(" ")[0])
@@ -52,9 +65,27 @@ def parse_ingress_latencies_mp(fn):
 	results = ppool.map(single_process_parse, args)
 	ppool.close()
 
+
 	all_meas_by_ip, all_meas_by_popp = {}, {}
-	for res in results:
-		meas_by_popp, meas_by_ip = res['meas_by_popp'], res['meas_by_ip']
+	for worker_n in range(n_workers):
+		print('parsing post {}'.format(worker_n))
+		meas_by_popp_fn = os.path.join(TMP_DIR, 'meas_by_popp-{}.csv'.format(worker_n))
+		meas_by_popp = {}
+		for row in open(meas_by_popp_fn,'r'):
+			pop,peer,ips = row.strip().split(',')
+			ips = ips.split('-')
+			meas_by_popp[pop,peer] = ips
+		meas_by_ip_fn = os.path.join(TMP_DIR, 'meas_by_ip-{}.csv'.format(worker_n))
+		meas_by_ip = {}
+		for row in open(meas_by_ip_fn, 'r'):
+			fields = row.strip().split(',')
+			ip = fields[0]
+			meas_by_ip[ip] = {}
+			fields = fields[1:]
+			for i in range(len(fields)):
+				if fields[i] == "": continue
+				pop,peer,lat = fields[i].split('-')
+				meas_by_ip[ip][pop,peer] = float(lat)
 		for popp in meas_by_popp:
 			try:
 				all_meas_by_popp[popp] = all_meas_by_popp[popp].union(meas_by_popp[popp])
@@ -69,6 +100,9 @@ def parse_ingress_latencies_mp(fn):
 				all_meas_by_ip[ip][popp] = meas_by_ip[ip][popp]
 	for popp in all_meas_by_popp:
 		all_meas_by_popp[popp] = list(all_meas_by_popp[popp])
+	call("rm {}".format(os.path.join(TMP_DIR, 'meas_by_popp*')),shell=True)
+	call("rm {}".format(os.path.join(TMP_DIR, 'meas_by_ip*')),shell=True)
+
 	return {'meas_by_popp': all_meas_by_popp, 'meas_by_ip': all_meas_by_ip}
 
 

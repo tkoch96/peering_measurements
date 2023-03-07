@@ -102,6 +102,8 @@ class AS_Utils_Wrapper:
 				asn = ip_or_asn
 		else:
 			asn = ip_or_asn
+		if asn is None:
+			return asn
 		if type(asn) == str:
 			if asn.lower() == 'unknown' or asn.lower() == 'none' or asn.lower() == "na" or asn.lower() == "null":
 				return None
@@ -153,7 +155,7 @@ class AS_Utils_Wrapper:
 						self.routeviews_asn_to_pref[asn].append(pref + "/" + l)
 					except KeyError:
 						self.routeviews_asn_to_pref[asn] = [pref + "/" + l]
-					self.routeviews_pref_to_asn[pref] = asn
+					self.routeviews_pref_to_asn[pref + "/" + l] = asn
 
 	def check_load_as_rel(self):
 		"""Loads AS relationships if we haven't already. Downloaded from here: 
