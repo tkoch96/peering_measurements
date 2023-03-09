@@ -145,7 +145,7 @@ class Pinger_Wrapper:
 		# Parse all the logs
 		print("Parsing tcpdump logs")
 		pop_jobs = [(pop,copy.copy(meas_ret), copy.copy(_id_to_meas_i), copy.copy(srcsdict), copy.copy(dstsdict), ) for pop in self.pops]
-		ppool = multiprocessing.Pool(processes=16)
+		ppool = multiprocessing.Pool(processes=int(multiprocessing.cpu_count()//4))
 		rets = ppool.map(parse_ping_results,  pop_jobs)
 		ppool.close()
 		print("Combining rets from workers")

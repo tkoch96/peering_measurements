@@ -877,26 +877,3 @@ def get_as_path(raw_as_path, as_siblings, v=False):
 				break
 		i = i + 1
 	return as_path
-
-
-# This doesn't really work
-from azure.kusto.data.helpers import dataframe_from_result_table
-def execute_kusto_query(kusto_client, kusto_database, q, cache, probe_id):
-	print('executing q {} '.format(np.random.random()))
-	kusto_response = kusto_client.execute(kusto_database, q)
-	df = dataframe_from_result_table(kusto_response.primary_results[0])
-	
-	cache[probe_id] = {
-		"prefixes": [],
-		"next_hops": [],
-		"timestamps": [],
-		"timestamp_fetched": time.time(),
-	}
-	if len(df['Prefix']) == 0:
-		print("No routes for probe {}".format(probe_id))
-		del cache[probe_id]
-	for prefix, next_hop, timestamp_route in zip(df['Prefix'], df['NextHop'], 
-		df['most_recent_timestamp']):
-		cache[probe_id]["prefixes"].append(prefix)
-		cache[probe_id]["next_hops"].append(next_hop)
-		cache[probe_id]["timestamps"].append(timestamp_route)

@@ -131,14 +131,6 @@ class Peering_Pinger():
 			this_mux_str = this_mux_str[0]
 			self.pop_to_intf[pop] = "tap" + re.search("tap(\d+)", this_mux_str).group(1)
 		
-		self.default_intf = 'eth0'
-		self.internal_ip = ni.ifaddresses(self.default_intf)[ni.AF_INET][0]['addr']
-		self.internal_ip_bytes = socket.inet_aton(self.internal_ip)
-
-		## By convention, I use the 241 for unicast
-		self.unicast_pref = "184.164.241.0/24"
-		self.unicast_addr = "184.164.241.1"
-
 		### prefixes we can conduct experiments with
 		self.available_prefixes = ["184.164.238.0/24","184.164.239.0/24","184.164.240.0/24", 
 			"184.164.241.0/24","184.164.242.0/24","184.164.243.0/24"]
@@ -258,6 +250,7 @@ class Peering_Pinger():
 				self.multipop_clients.append(client)
 
 		## perhaps reachable addresses for clients
+		print("Loading Microsoft user data")
 		ip_ug_d = list(csv.DictReader(open(os.path.join(DATA_DIR, 'client24_metro_vol_20220620.csv'),'r')))
 		self.dst_to_ug = {row['client_24']: (row['metro'], row['asn']) for row in ip_ug_d}
 		self.ug_to_vol = {}
@@ -316,7 +309,6 @@ class Peering_Pinger():
 			for ug in ug_to_loc:
 				lat,lon = ug_to_loc[ug]
 				f.write("{},{},{}\n".format(lat,lon,self.ug_to_vol[ug]))
-		self.default_ip = ni.ifaddresses('eth0')[ni.AF_INET][0]['addr']
 		### Get AS to org mapping and vice versa for compatibility with PAINTER pipeline
 		peer_to_org_fn = os.path.join(CACHE_DIR, 'vultr_peer_to_org.csv')
 		self.peer_to_org,self.org_to_peer = {}, {}
@@ -335,6 +327,10 @@ class Peering_Pinger():
 			self.org_to_peer[org] = list(set(self.org_to_peer[org]))
 
 		self.maximum_inflation = kwargs.get('maximum_inflation', 1)
+
+		## Free up memory
+		del self.dst_to_ug
+		del self.ug_to_vol
 
 	def pop_to_close_clients(self, pop):
 		### measure to any client whose catchment is within some number of km
@@ -525,115 +521,6 @@ class Peering_Pinger():
 				used_ugs[ntwrk] = None
 				ret.append(ip)
 		print("Condensed {} targets to {} targets.".format(len(ips), len(ret)))
-		return ret
-
-	def get_advertisements_prioritized_old(self):
-		### Returns a set of <prefix, popps> to advertise
-
-		already_completed_popps = []
-		if os.path.exists(self.already_completed_popps_fn):
-			already_completed_popps = [tuple(row.strip().split(',')) for row in open(self.already_completed_popps_fn,'r')]
-
-		if True:
-			min_separation = 60000 # kilometers
-			import geopy.distance 
-			pop_clusters = []
-			for pop, loc in self.pop_to_loc.items():
-				found = False
-				np.random.shuffle(pop_clusters)
-				for pop_cluster in pop_clusters:
-					conflict = False
-					for p in pop_cluster:
-						if geopy.distance.geodesic(self.pop_to_loc[p],loc).km < min_separation:
-							conflict=True
-							break
-					if not conflict:
-						pop_cluster.append(pop)
-						found=True
-						break
-				if not found:
-					pop_clusters.append([pop])
-			print(pop_clusters)
-		else:
-			# partially manual
-			pop_clusters = [['chicago', 'delhi', 'london', 'melbourne'], ['toronto', 'warsaw', 'silicon', 'mexico'], 
-				['dallas', 'frankfurt', 'tokyo'], 
-				['amsterdam', 'atlanta', 'bangalore', 'johannesburg', 'sydney'],
-				['miami', 'mumbai', 'stockholm'], ['newyork', 'seoul', 'seattle','paris'],  
-				['losangelas', 'madrid', 'saopaulo', 'singapore']]
-
-
-		ret = []
-		prefi = 0
-		nprefs = len(self.available_prefixes)
-		as_classifications_d = list(csv.DictReader(open(os.path.join(DATA_DIR, 'AS_Features_032022.csv'),'r')))
-		as_classifications = {row['asNumber']: row for row in as_classifications_d}
-		def popp_to_score(popp):
-			pop, peer = popp			
-			if int(peer) > 60000:
-				### TODO -- implement larger ASNs
-				return -10
-			try:
-				corresponding_classification = as_classifications[str(peer)]
-				if corresponding_classification['ASCone'] == '': 
-					return 0
-				return int(float(corresponding_classification['ASCone']))
-			except KeyError:
-				pass
-			return 0
-
-		all_popps = [(pop,peer) for pop in self.peers for peer in self.peers[pop]]
-		popps_to_focus_on = get_difference(all_popps, already_completed_popps)
-		while len(popps_to_focus_on) > 0:
-			### At each iteration, get the next-best set of advertisements to conduct
-			popps_to_focus_on = get_difference(all_popps, already_completed_popps)
-			effective_peers = {}
-			for pop,peer in popps_to_focus_on:
-				try:
-					effective_peers[pop].append(peer)
-				except KeyError:
-					effective_peers[pop] = [peer]
-
-			pop_scores = {pop: sum([popp_to_score((pop,peer)) for peer in effective_peers[pop]]) for pop in effective_peers}
-			cluster_scores = {i:sum(pop_scores.get(pop,0) for pop in pop_cluster) for i,pop_cluster in enumerate(pop_clusters)}
-			# sort cluster -> popps within each cluster
-			success = False
-			for clusteri,score in sorted(cluster_scores.items(), key = lambda el : -1 * el[1]):
-				cluster = pop_clusters[clusteri]
-				intrapop_scores = {pop: {peer: popp_to_score((pop,peer)) for peer in effective_peers.get(pop,[])} \
-					for pop in cluster}
-				sorted_intrapop_scores = {pop: sorted(intrapop_scores[pop].items(), key = lambda el : -1 * el[1]) for \
-					pop in intrapop_scores}
-
-				max_l = np.max([len(intrapop_scores[pop]) for pop in cluster])
-				for i in range(max_l):
-					this_pref_adv = []
-					pref = self.available_prefixes[prefi % nprefs]
-					already_using_peers = {}
-					for pop in sorted_intrapop_scores:
-						try:
-							tmpi = copy.copy(i)
-							while True: ### Enforce that we don't advertise the same prefix to the same peer in multiple locs
-								peer,score = sorted_intrapop_scores[pop][i]
-								try:
-									already_using_peers[peer]
-									i += 1
-									continue
-								except KeyError:
-									already_using_peers[peer] = None
-									break
-							i = tmpi
-							this_pref_adv.append((pref, pop, peer, score))	
-							already_completed_popps.append((pop,peer))
-						except IndexError:
-							pass
-					if len(this_pref_adv) > 0:
-						ret.append(this_pref_adv)
-						prefi += 1
-						success = True
-						break
-				if success:
-					break
 		return ret
 
 	def get_advertisements_prioritized(self):
@@ -1059,6 +946,7 @@ class Peering_Pinger():
 
 		print("\n\n-------MAKE SURE YOU CLEARED ROUTING TABLE RULES-------\n") # i always forget this smh
 		time.sleep(10)
+		exit(0)
 		for adv_round_i in range(n_adv_rounds):
 			self.measure_vpn_lats()
 			adv_sets = prefix_popps[n_prefs * adv_round_i: n_prefs * (adv_round_i+1)]
