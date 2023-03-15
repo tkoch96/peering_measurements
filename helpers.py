@@ -12,9 +12,14 @@ from config import *
 
 
 def single_process_parse(args, **kwargs):
-	fn,lines,worker_n, = args
+	fn,lines,limit_pops,worker_n, = args
 	print("Parsing results in worker : {}".format(worker_n))
 	results = {'meas_by_ip': {}, 'meas_by_popp': {}}
+
+	already_completed = {}
+	for row in open(os.path.join(CACHE_DIR, 'already_completed_popps.csv'), 'r'):
+		already_completed[tuple(row.strip().split(','))] = None
+
 	i=0
 	for row in open(fn,'r'):
 		i += 1
@@ -23,8 +28,13 @@ def single_process_parse(args, **kwargs):
 		if i >= lines[1]:
 			continue 
 		_,ip,pop,peer,lat = row.strip().split(',')
+		if pop not in limit_pops:continue
 		lat = np.maximum(float(lat) * 1000,1)
 		popp = (pop,peer)
+		# try:
+		# 	already_completed[popp]
+		# except KeyError:
+		# 	continue
 		try:
 			results['meas_by_ip'][ip]
 		except KeyError:
@@ -56,19 +66,25 @@ def parse_ingress_latencies_mp(fn):
 	n_workers = np.minimum(multiprocessing.cpu_count(), 8)
 	ppool = multiprocessing.Pool(processes=n_workers)
 
+	limit_pops = ['atlanta','miami']
 	n_lines = int(check_output("wc -l {}".format(fn), shell=True).decode().split(" ")[0])
 	n_lines_per_worker = int(np.ceil(n_lines / n_workers))
 	args = []
 	for worker_n in range(n_workers):
-		args.append((fn,(n_lines_per_worker*worker_n,n_lines_per_worker*(worker_n+1)),worker_n,))
+		args.append((fn,(n_lines_per_worker*worker_n,n_lines_per_worker*(worker_n+1)),
+			limit_pops,worker_n,))
 
 	results = ppool.map(single_process_parse, args)
 	ppool.close()
 
+	already_completed = {}
+	for row in open(os.path.join(CACHE_DIR, 'already_completed_popps.csv'), 'r'):
+		already_completed[tuple(row.strip().split(','))] = None
+
 
 	all_meas_by_ip, all_meas_by_popp = {}, {}
 	for worker_n in range(n_workers):
-		print('parsing post {}'.format(worker_n))
+		print('parsing post analysis {}'.format(worker_n))
 		meas_by_popp_fn = os.path.join(TMP_DIR, 'meas_by_popp-{}.csv'.format(worker_n))
 		meas_by_popp = {}
 		for row in open(meas_by_popp_fn,'r'):
@@ -102,6 +118,11 @@ def parse_ingress_latencies_mp(fn):
 		all_meas_by_popp[popp] = list(all_meas_by_popp[popp])
 	call("rm {}".format(os.path.join(TMP_DIR, 'meas_by_popp*')),shell=True)
 	call("rm {}".format(os.path.join(TMP_DIR, 'meas_by_ip*')),shell=True)
+
+	missing_meas_for = get_difference(already_completed, all_meas_by_popp)
+	with open(os.path.join(CACHE_DIR, 'missing_meas_for.csv'),'w') as f:
+		for pop,peer in missing_meas_for:
+			f.write("{},{}\n".format(pop,peer))
 
 	return {'meas_by_popp': all_meas_by_popp, 'meas_by_ip': all_meas_by_ip}
 

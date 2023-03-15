@@ -88,6 +88,7 @@ class AS_Utils_Wrapper:
 		# if input is organization, leaves it alone
 		# if we don't know the ASN of the IP address, returns None
 		if ip_or_asn is None: return None
+		ip_or_asn = str(ip_or_asn)
 		if ip_or_asn == "": return None
 		if type(ip_or_asn) == str:
 			if "." in ip_or_asn:
@@ -168,7 +169,6 @@ class AS_Utils_Wrapper:
 					fields = row.strip().split('|')
 					as1 = self.parse_asn(fields[0])
 					as2 = self.parse_asn(fields[1])
-					
 					if fields[-1] == '0':
 						self.as_rel[as1, as2] = P_TO_P # peers
 						self.as_rel[as2, as1] = P_TO_P
@@ -184,10 +184,6 @@ class AS_Utils_Wrapper:
 			for (as_1, as_2), rel in self.as_rel.items():
 				if rel == P_TO_C:
 					try:
-						try:
-							self.as_to_customers[as_2]
-						except KeyError:
-							pass
 						self.as_to_customers[as_1].append(as_2)
 					except KeyError:
 						self.as_to_customers[as_1] = [as_2]
@@ -397,43 +393,44 @@ class AS_Utils_Wrapper:
 			have_s1 = False
 			have_s2 = False
 			try:
-				self.as_siblings[sib_1]
+				self.as_siblings[sib1]
 				have_s1 = True
 			except KeyError:
 				pass
 			try:
-				self.as_siblings[sib_2]
+				self.as_siblings[sib2]
 				have_s2 = True
 			except KeyError:
 				pass
 			# if we haven't seen these ASes before, form a new organization for these ASes
 			if not have_s1 and not have_s2:
-				self.as_siblings[sib_1] = uid
-				self.as_siblings[sib_2] = uid
+				self.as_siblings[sib1] = uid
+				self.as_siblings[sib2] = uid
 				uid += 1
 			elif have_s1: # S1 and S2 are siblings -- update our data structure
-				this_sib_uid = self.as_siblings[sib_1]
-				self.as_siblings[sib_2] = this_sib_uid
+				this_sib_uid = self.as_siblings[sib1]
+				self.as_siblings[sib2] = this_sib_uid
 			else:
-				this_sib_uid = self.as_siblings[sib_2]
-				self.as_siblings[sib_1] = this_sib_uid
+				this_sib_uid = self.as_siblings[sib2]
+				self.as_siblings[sib1] = this_sib_uid
 			return uid
 		
 		# It is important that these files stay the same, and are loaded in the same order, or else we have to recalculate lots of things in the cache
 		self.siblings_fns = ["vasilis_siblings_20200816.txt","as_relationships_20210201.txt",'microsoft_siblings_20220606.json'] # from Vasilis Giotsas
-		siblings_fn = os.path.join(DATA_DIR, self.siblings_fns[0])
-		with open(siblings_fn, 'r') as f:
-			for row in f:
-				sib_1, sib_2 = row.strip().split(' ')
-				uid = check_add_siblings(sib_1,sib_2,uid)
-		siblings_fn = os.path.join(DATA_DIR, self.siblings_fns[1])
-		with open(siblings_fn,'r') as f:
-			# add the siblings from as relationships file as well
-			for row in f:
-				fields = row.strip().split('|')
-				if fields[-1] != '1': continue
-				sib_1, sib_2 = fields[0:2]
-				uid = check_add_siblings(sib_1,sib_2,uid)
+		if False:
+			siblings_fn = os.path.join(DATA_DIR, self.siblings_fns[0])
+			with open(siblings_fn, 'r') as f:
+				for row in f:
+					sib_1, sib_2 = row.strip().split(' ')
+					uid = check_add_siblings(sib_1,sib_2,uid)
+			siblings_fn = os.path.join(DATA_DIR, self.siblings_fns[1])
+			with open(siblings_fn,'r') as f:
+				# add the siblings from as relationships file as well
+				for row in f:
+					fields = row.strip().split('|')
+					if fields[-1] != '1': continue
+					sib_1, sib_2 = fields[0:2]
+					uid = check_add_siblings(sib_1,sib_2,uid)
 		siblings_fn = os.path.join(DATA_DIR, self.siblings_fns[2])
 		siblings_data_obj = json.load(open(siblings_fn,'r')) # NOTE -- Microsoft siblings data provides no new information afaik
 		for k,v in siblings_data_obj.items():

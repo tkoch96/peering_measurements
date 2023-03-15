@@ -109,25 +109,30 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		self.save_fig("number_reachable_ingresses_by_as_comparison.pdf")
 
 	def summarize_need_meas(self, peers):
-		all_asns = set()
-		for peer in peers:
-			peer = self.parse_asn(peer)
-			all_asns = all_asns.union(self.get_cc(peer))
-		print("{} possible ASNs in which to look for addresses".format(len(all_asns)))
 		with open(os.path.join(CACHE_DIR, 'possible_pref_targets_by_peer.csv'),'w') as f:
-			for asn in all_asns:
-				prefs = self.routeviews_asn_to_pref.get(asn)
-				if prefs is not None:
-					prefs = "-".join(prefs)
+			for peer in peers:
+				print("Summarizing {}".format(peer))
+				peer = self.parse_asn(peer)
+				all_asns = self.get_cc(peer)
+				all_prefs = {}
+				for asn in all_asns:
+					prefs = self.routeviews_asn_to_pref.get(asn)
+					if prefs is not None:
+						for pref in prefs:
+							all_prefs[pref] = None
+				all_prefs = list(all_prefs)
+				if len(all_prefs) > 0:
+					prefs_str = "-".join(all_prefs)	
 				else:
-					prefs = ""
-				f.write("{},{}\n".format(asn, prefs))
+					prefs_str = ""
+				f.write("{},{}\n".format(peer, prefs_str))
+		print("Done summarizing need meas")
 
 	def characterize_per_ingress_measurements(self):
 		### Look at what we measured to for each ingress, some basic properties
 		meas_by_popp = {}
 		meas_by_ip = {}
-		by_ingress_fn = os.path.join(CACHE_DIR, '{}_ingress_latencies_by_dst.csv'.format(
+		by_ingress_fn = os.path.join(CACHE_DIR, '{}_ingress_latencies_by_dst_small.csv'.format(
 			self.system))
 			
 		res = parse_ingress_latencies_mp(by_ingress_fn)
@@ -184,12 +189,22 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 					best_improve[ip] = np.minimum(best_improve[ip],300)
 					
 					n_saw_improve[ip] += 1
+		n_each_popp_best, n_each_pop_best = {},{}
 		with open(os.path.join(TMP_DIR, 'best_improve_over_anycast_by_ip.csv'),'w') as f:
 			f.write("ip,best_pop,best_peer,improve,anycast_lat,anycast_pop,2nd,2nd_lat,3rd,3rd_lat\n")
 			for ip,imprv in best_improve.items():
+				popp = best_improve_intf[ip]
+				if popp is None:
+					continue
+				try:
+					n_each_popp_best[popp] += 1
+				except KeyError:
+					n_each_popp_best[popp] = 1
+				try:
+					n_each_pop_best[popp[0]] += 1
+				except KeyError:
+					n_each_pop_best[popp[0]] = 1
 				if imprv > 50:
-					popp = best_improve_intf[ip]
-
 					### approx location of this guy by getting lowest latencies
 					closest_popps = sorted(meas_by_ip[ip].items(), key = lambda el : el[1])
 					
@@ -205,6 +220,8 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 					f.write("{},{},{},{},{},{},{},{},{},{}\n".format(ip,popp[0],popp[1],int(imprv),
 						int(anycast_latencies[ip]), anycast_pop[ip], 
 						closest_second, int(closest_second_lat), closest_third, int(closest_third_lat)))
+		print(sorted(n_each_popp_best.items(), key = lambda el : el[1]))
+		print(sorted(n_each_pop_best.items(), key = lambda el : el[1]))
 		x,cdf_x = get_cdf_xy(list(n_saw_improve.values()))
 		plt.plot(x,cdf_x)
 		plt.grid(True)
@@ -245,14 +262,35 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			lat = float(lat) * 1000
 			if lat > 2000:continue
 			jc_anycast_latencies[ip,jc_ip_catchments[ip]] = lat
+		jc_anycast_latencies_new = {}
+		for row in open(os.path.join(CACHE_DIR, 'jc_{}_anycast_latency_new.csv'.format(self.system)),'r'):
+			ip, lat = row.strip().split('\t')
+			try:
+				jc_ip_catchments[ip]
+			except KeyError:
+				continue
+			lat = float(lat)
+			if lat > 2000:continue
+			jc_anycast_latencies_new[ip,jc_ip_catchments[ip]] = lat
 		my_anycast_latencies = {k:v for k,v in my_anycast_latencies.items() if len(v) == 2}
 		ips_in_both = get_intersection(my_anycast_latencies,jc_anycast_latencies)
+		print("Comparing {} IPs".format(len(ips_in_both)))
+		ips_in_both = get_intersection(ips_in_both, jc_anycast_latencies_new)
+		print("{} IPs in jc new".format(len(jc_anycast_latencies_new)))
 		print("Comparing {} IPs".format(len(ips_in_both)))
 
 
 		diffs = list([min(my_anycast_latencies[ip]) - jc_anycast_latencies[ip] for ip in ips_in_both])
 		x,cdf_x = get_cdf_xy(diffs)
-		plt.plot(x,cdf_x,label="Mine - JC")
+		plt.plot(x,cdf_x,label="Mine - JC Old")
+
+		diffs = list([min(my_anycast_latencies[ip]) - jc_anycast_latencies_new[ip] for ip in ips_in_both])
+		x,cdf_x = get_cdf_xy(diffs)
+		plt.plot(x,cdf_x,label="Mine - JC New")
+
+		diffs = list([jc_anycast_latencies[ip] - jc_anycast_latencies_new[ip] for ip in ips_in_both])
+		x,cdf_x = get_cdf_xy(diffs)
+		plt.plot(x,cdf_x,label="JC Old - JC New")
 
 		# Compare mine at two separate time slices
 		diffs = []
