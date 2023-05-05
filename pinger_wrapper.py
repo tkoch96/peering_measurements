@@ -6,12 +6,13 @@ from subprocess import call, check_output
 # PINGER = "sudo /home/tom/pinger/target/release/pinger"
 PINGER = "sudo /home/ubuntu/pinger/target/release/pinger"
 
+LOW_MEM = True
+
 pop_to_outfn = lambda pop : os.path.join(TMP_DIR, "tcpdumpout_{}.txt".format(pop))
 def parse_ping_results(*args):
 	pop, meas_ret, _id_to_meas_i, srcsdict, dstsdict, = args[0]
 	n_rounds = len(_id_to_meas_i)
-	print(_id_to_meas_i)
-	print(n_rounds)
+	print("Parsing pop : {}".format(pop))
 	for row in open(pop_to_outfn(pop), 'r'):
 		# parse the measurements
 		try:
@@ -36,7 +37,11 @@ def parse_ping_results(*args):
 			dstsdict[dst] # not a dst we're tracking, random noise
 		except KeyError:
 			continue
-		_id = int(_id)
+		try:
+			_id = int(_id)
+		except ValueError:
+			# malformed string
+			continue
 		try:
 			this_dst_meas_i = _id_to_meas_i[_id]
 		except KeyError:
@@ -55,24 +60,24 @@ def parse_ping_results(*args):
 		if which == 'end':
 			meas_ret[src][dst][this_dst_meas_i]['pop'] = pop
 		meas_ret[src][dst][this_dst_meas_i][which + 'pop'] = pop
-	## reduce size of transfer between processes by deleting empty information
-	to_del = []
-	for src in meas_ret:
-		for dst in meas_ret[src]:
-			for i,meas in enumerate(reversed(meas_ret[src][dst])):
-				if meas['t_end'] is None:
-					to_del.append((src,dst,n_rounds-i-1))
-	for src,dst,i in to_del:
-		del meas_ret[src][dst][i]
-		if len(meas_ret[src][dst]) == 0:
-			del meas_ret[src][dst]
+	# ## reduce size of transfer between processes by deleting empty information
+	# to_del = []
+	# for src in meas_ret:
+	# 	for dst in meas_ret[src]:
+	# 		for i,meas in enumerate(reversed(meas_ret[src][dst])):
+	# 			if meas['t_end'] is None:
+	# 				to_del.append((src,dst,n_rounds-i-1))
+	# for src,dst,i in to_del:
+	# 	del meas_ret[src][dst][i]
+	# 	if len(meas_ret[src][dst]) == 0:
+	# 		del meas_ret[src][dst]
 	return meas_ret
 
 class Pinger_Wrapper:
 	def __init__(self, pops, pop_to_intf):
 		self.pops = pops
 		self.n_rounds = 3
-		self.rate_limit = 10000 ## pps
+		self.rate_limit = 1000 ## pps
 		self.custom_table_start = 201
 		self.src_to_table = {}
 		self.bird_table = 20000
@@ -161,12 +166,18 @@ class Pinger_Wrapper:
 		dstsdict = {dst:None for dstset in dsts_sets for dst in dstset}
 		# Parse all the logs
 		print("Parsing tcpdump logs")
-		pop_jobs = [(pop,copy.deepcopy(meas_ret), copy.deepcopy(_id_to_meas_i), 
-			copy.deepcopy(srcsdict), copy.deepcopy(dstsdict), ) for pop in self.pops]
-		ppool = multiprocessing.Pool(processes=4)
-		rets = ppool.map(parse_ping_results,  pop_jobs)
-		ppool.close()
-		print("Combining rets from workers")
+		if not LOW_MEM:
+			pop_jobs = [(pop,copy.deepcopy(meas_ret), copy.deepcopy(_id_to_meas_i), 
+				copy.deepcopy(srcsdict), copy.deepcopy(dstsdict), ) for pop in self.pops]
+			ppool = multiprocessing.Pool(processes=1)
+			rets = ppool.map(parse_ping_results,  pop_jobs)
+			ppool.close()
+			print("Combining rets from workers")
+		else:
+			rets = []
+			for pop in self.pops:
+				args = (pop, meas_ret, _id_to_meas_i, srcsdict, dstsdict, )
+				rets.append(parse_ping_results(args))
 		for ret in rets: # little complicated to combine
 			for src in ret:
 				for dst in ret[src]:
@@ -197,8 +208,14 @@ class Pinger_Wrapper:
 		return meas_ret
 	
 	def simple_test(self):
-		call("sudo tcpdump -i tap3 -n icmp > tmp/out.txt &", shell=True)
-		time.sleep(10)
+		call("sudo tcpdump -i ens5 -n icmp > tmp/out.txt &", shell=True)
+		time.sleep(3)
+		srcs = ['172.31.37.83']
+		self.src_to_table[srcs[0]] = '20010'
+		self.n_rounds = 1
+		taps = ['ens5']
+		dst_sets = [['8.8.8.8','1.1.1.1']]
+		print(self.run(srcs,taps,dst_sets))
 		call("sudo killall tcpdump", shell=True)
 
 if __name__ == "__main__":

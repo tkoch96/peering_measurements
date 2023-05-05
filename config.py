@@ -14,6 +14,9 @@ P_TO_C = -1
 P_TO_P = 0
 S_TO_S = 5
 
+EXCLUDE_PEERS = [6939,15169,9002,33891,9009,577,8075]
+
+
 POP_TO_LOC = {
 	'peering':{
 		'amsterdam01': (52.359,4.933),
@@ -78,3 +81,23 @@ POP_INTERFACE_INFO = {
     'toronto': {'dev': 'tap15', 'ip': '100.79.0.15'},
     'warsaw': {'dev': 'tap11', 'ip': '100.75.0.11'},
 }
+
+cols = ['orange','red','black','gold','magenta','firebrick','salmon','orangered','lightsalmon','sienna','lawngreen','darkseagreen','palegoldenrod',
+	'darkslategray','deeppink','crimson','mediumpurple','khaki','dodgerblue','lime','black','midnightblue',
+	'lightsteelblue']
+markers = ['_','.','<','^','>','D','*','o']
+
+def get_col_marker(i):
+	col = cols[i % len(cols)]
+	marker = markers[i // len(cols)]
+	return {"c":col,"marker":marker}
+
+
+
+
+CAREFUL = False
+RFD_WAIT_TIME = 600 # PEERING testbed policy
+
+
+
+

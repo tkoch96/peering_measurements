@@ -59,12 +59,12 @@ class AS_Utils_Wrapper:
 		for el in d:
 			pref = el.split('/')[0]
 			pref_24 = ip32_to_24(pref)
-			if is_bad_ip(pref): continue # don't resolve private IP addresses
+			if is_bad_ip(pref_24): continue # don't resolve private IP addresses
 			try:
-				self.ip_to_asn[pref]
+				self.ip_to_asn[pref_24]
 			except KeyError:
-				if self.routeviews_pref_to_asn.get(pref) is not None: continue
-				dont_know.append(pref)
+				if self.routeviews_pref_to_asn.get(pref_24) is not None: continue
+				dont_know.append(pref_24)
 		if dont_know == []: return
 		ret = lookup_asn(dont_know)
 		for k,v in ret.items():

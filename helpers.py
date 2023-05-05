@@ -11,14 +11,111 @@ from config import *
 ### so some of them might be irrelevant.
 
 
+def ip32_to_24(ip):
+	return ".".join(ip.split(".")[0:3]) + ".0"
+
+def check_ping_responsive(ips):
+	print("Checking responsiveness for {} IP addresses".format(len(ips)))
+	ret = []
+	if len(ips) == 0: return ret
+	ips = list(set(ips))
+	target_fn = os.path.join(TMP_DIR,'targets.txt')
+	with open(target_fn,'w') as f:
+		for ip in ips:
+			f.write(ip + "\n")
+
+	out_fn = os.path.join(TMP_DIR, 'tmp.warts')
+	scamp_cmd = 'sudo scamper -O warts -c "ping -c 1" -p 8000 -M tak2154atcolumbiadotedu'\
+		' -l peering_interfaces -o {} -f {} -p 10000'.format(out_fn, target_fn)
+	try:
+		check_output(scamp_cmd, shell=True)
+		cmd = "sc_warts2json {}".format(out_fn)
+		out = check_output(cmd, shell=True).decode()
+		for meas_str in out.split('\n'):
+			if meas_str == "": continue
+			measurement_obj = json.loads(meas_str)
+			meas_type = measurement_obj['type']
+			if meas_type == 'ping':
+				dst = measurement_obj['dst']
+				if measurement_obj['responses'] != []:
+					ret.append(dst)
+	except:
+		# likely bad input
+		import traceback
+		traceback.print_exc()
+		pass
+
+	return ret
+
+def measure_latency_ips(ips):
+	print("Measuring latency for {}".format(ips))
+	ret = {ip:[] for ip in ips}
+	addresses_str = " ".join(ips)
+	if addresses_str != "":
+		out_fn = 'tmp.warts'
+		scamp_cmd = 'sudo scamper -O warts -c "ping -c 20" -p 8000 -M tak2154atcolumbiadotedu'\
+			' -l peering_interfaces -o {} -i {}'.format(out_fn, addresses_str)
+		try:
+			check_output(scamp_cmd, shell=True)
+			cmd = "sc_warts2json {}".format(out_fn)
+			out = check_output(cmd, shell=True).decode()
+			for meas_str in out.split('\n'):
+				if meas_str == "": continue
+				measurement_obj = json.loads(meas_str)
+				meas_type = measurement_obj['type']
+				if meas_type == 'ping':
+					dst = measurement_obj['dst']
+					if measurement_obj['responses'] != []:
+						dst = measurement_obj['dst']
+						ret[dst] = [response['rtt'] * .001 for response in measurement_obj['responses']]
+		except:
+			# likely bad input
+			import traceback
+			traceback.print_exc()
+			pass
+	return ret
+
+def get_intersection(set1, set2):
+	"""Gets intersection of two sets."""
+	return list(set(set1) & set(set2))
+def get_difference(set1, set2):
+	"""Gets set1 - set2."""
+	set1 = set(set1); set2 = set(set2)
+	return list(set1.difference(set2))
+def split_seq(seq, n_pieces):
+	# splits seq into n_pieces chunks of approximately equal size
+	# useful for splitting things to divide among processors
+	newseq = []
+	splitsize = 1.0/n_pieces*len(seq)
+	for i in range(n_pieces):
+		newseq.append(seq[int(round(i*splitsize)):int(round((i+1)*splitsize))])
+	return newseq
+
+def pref_to_ip(pref):
+	return ".".join(pref.split(".")[0:3]) + ".1"
+def ip_to_pref(ip):
+	return ".".join(ip.split(".")[0:3]) + ".0/24"
+
 def single_process_parse(args, **kwargs):
 	fn,lines,limit_pops,worker_n, = args
 	print("Parsing results in worker : {}".format(worker_n))
 	results = {'meas_by_ip': {}, 'meas_by_popp': {}}
 
+	provider_popps = []
+	for row in open(os.path.join(CACHE_DIR, 'vultr_provider_popps.csv'),'r'):
+		pop,peer = row.strip().split(',')
+		provider_popps.append((pop,peer))
+
+	exclude_providers = True
+	if exclude_providers:
+		print("\n")
+		print("_-__----_-_-NOTE EXCLUDING PROVIDERS FROM PARSE__- --s-df-sdf-s")
+		print("\n")
+
 	already_completed = {}
 	for row in open(os.path.join(CACHE_DIR, 'already_completed_popps.csv'), 'r'):
 		already_completed[tuple(row.strip().split(','))] = None
+
 
 	i=0
 	for row in open(fn,'r'):
@@ -29,6 +126,11 @@ def single_process_parse(args, **kwargs):
 			continue 
 		_,ip,pop,peer,lat = row.strip().split(',')
 		if pop not in limit_pops:continue
+		if exclude_providers:
+			if (pop,peer) in provider_popps:
+				continue
+		if int(peer) in EXCLUDE_PEERS:
+			continue
 		lat = np.maximum(float(lat) * 1000,1)
 		popp = (pop,peer)
 		# try:
@@ -66,7 +168,7 @@ def parse_ingress_latencies_mp(fn):
 	n_workers = np.minimum(multiprocessing.cpu_count(), 8)
 	ppool = multiprocessing.Pool(processes=n_workers)
 
-	limit_pops = ['atlanta','miami']
+	limit_pops = list(POP_TO_LOC['vultr'])
 	n_lines = int(check_output("wc -l {}".format(fn), shell=True).decode().split(" ")[0])
 	n_lines_per_worker = int(np.ceil(n_lines / n_workers))
 	args = []
