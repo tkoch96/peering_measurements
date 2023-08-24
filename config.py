@@ -53,33 +53,34 @@ POP_TO_LOC = {
 
 
 POP_INTERFACE_INFO = {
-    'amsterdam': {'dev': 'tap3', 'ip': '100.67.0.3'},
-    'atlanta': {'dev': 'tap2', 'ip': '100.66.0.2'},
-    'bangalore': {'dev': 'tap18', 'ip': '100.82.0.18'},
-    'chicago': {'dev': 'tap8', 'ip': '100.72.0.8'},
-    'dallas': {'dev': 'tap13', 'ip': '100.77.0.13'},
-    'delhi': {'dev': 'tap19', 'ip': '100.83.0.19'},
-    'frankfurt': {'dev': 'tap6', 'ip': '100.70.0.6'},
-    'johannesburg': {'dev': 'tap27', 'ip': '100.91.0.27'},
-    'london': {'dev': 'tap22', 'ip': '100.86.0.22'},
-    'losangelas': {'dev': 'tap20', 'ip': '100.84.0.20'},
-    'madrid': {'dev': 'tap16', 'ip': '100.80.0.16'},
-    'melbourne': {'dev': 'tap25', 'ip': '100.89.0.25'},
-    'mexico': {'dev': 'tap14', 'ip': '100.78.0.14'},
-    'miami': {'dev': 'tap1', 'ip': '100.65.0.1'},
-    'mumbai': {'dev': 'tap23', 'ip': '100.87.0.23'},
-    'newyork': {'dev': 'tap12', 'ip': '100.76.0.12'},
-    'paris': {'dev': 'tap9', 'ip': '100.73.0.9'},
-    'saopaulo': {'dev': 'tap26', 'ip': '100.90.0.26'},
-    'seattle': {'dev': 'tap7', 'ip': '100.71.0.7'},
-    'seoul': {'dev': 'tap24', 'ip': '100.88.0.24'},
-    'silicon': {'dev': 'tap21', 'ip': '100.85.0.21'},
-    'singapore': {'dev': 'tap10', 'ip': '100.74.0.10'},
-    'stockholm': {'dev': 'tap17', 'ip': '100.81.0.17'},
-    'sydney': {'dev': 'tap5', 'ip': '100.69.0.5'},
-    'tokyo': {'dev': 'tap4', 'ip': '100.68.0.4'},
-    'toronto': {'dev': 'tap15', 'ip': '100.79.0.15'},
-    'warsaw': {'dev': 'tap11', 'ip': '100.75.0.11'},
+	'amsterdam': {'dev': 'tap1', 'ip': '100.65.0.1'},
+	'atlanta': {'dev': 'tap2', 'ip': '100.66.0.3'},
+	'bangalore': {'dev': 'tap3', 'ip': '100.67.0.5'},
+	'chicago': {'dev': 'tap4', 'ip': '100.68.0.7'},
+	'dallas': {'dev': 'tap5', 'ip': '100.69.0.9'},
+	'delhi': {'dev': 'tap6', 'ip': '100.70.0.11'},
+	'frankfurt': {'dev': 'tap7', 'ip': '100.71.0.13'},
+	'johannesburg': {'dev': 'tap8', 'ip': '100.72.0.15'},
+	'london': {'dev': 'tap9', 'ip': '100.73.0.17'},
+	'losangelas': {'dev': 'tap10', 'ip': '100.74.0.19'},
+	'madrid': {'dev': 'tap11', 'ip': '100.75.0.21'},
+	'melbourne': {'dev': 'tap12', 'ip': '100.76.0.23'},
+	'mexico': {'dev': 'tap13', 'ip': '100.77.0.25'},
+	'miami': {'dev': 'tap14', 'ip': '100.78.0.27'},
+	'mumbai': {'dev': 'tap15', 'ip': '100.79.0.29'},
+	'newyork': {'dev': 'tap16', 'ip': '100.80.0.31'},
+	# 'osaka': {'dev': 'tap17', 'ip': '100.76.0.23'},
+	'paris': {'dev': 'tap18', 'ip': '100.82.0.35'},
+	'saopaulo': {'dev': 'tap19', 'ip': '100.83.0.37'},
+	'seattle': {'dev': 'tap20', 'ip': '100.84.0.39'},
+	'seoul': {'dev': 'tap21', 'ip': '100.85.0.41'},
+	'silicon': {'dev': 'tap22', 'ip': '100.86.0.43'},
+	'singapore': {'dev': 'tap23', 'ip': '100.87.0.45'},
+	'stockholm': {'dev': 'tap24', 'ip': '100.88.0.47'},
+	'sydney': {'dev': 'tap25', 'ip': '100.89.0.49'},
+	'tokyo': {'dev': 'tap26', 'ip': '100.90.0.51'},
+	'toronto': {'dev': 'tap27', 'ip': '100.91.0.53'},
+	'warsaw': {'dev': 'tap28', 'ip': '100.92.0.55'},
 }
 
 cols = ['orange','red','black','gold','magenta','firebrick','salmon','orangered','lightsalmon','sienna','lawngreen','darkseagreen','palegoldenrod',
@@ -95,8 +96,9 @@ def get_col_marker(i):
 
 
 
-CAREFUL = False
-RFD_WAIT_TIME = 600 # PEERING testbed policy
+CAREFUL = True
+TIME_OFFSET = 3898022400 ## time delta between pinger pipeline datetime and actual datetime (fixed)
+RFD_WAIT_TIME = 1200 # PEERING testbed policy
 
 
 

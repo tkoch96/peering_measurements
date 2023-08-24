@@ -91,19 +91,21 @@ class Pinger_Wrapper:
 	#### NOTE -- if you kill the program and these don't delete properly, could cause problems
 	#### so manually delete them from time to time
 	def setup_iptable(self, ip_address, tap):
-		## set up rule that packets with source address ip_address should go out interface tap
-		next_hop = self.tap_to_nexthop(tap)
-		call("sudo ip rule add from {} table {}".format(ip_address, self.src_to_table[ip_address]), shell=True)
-		call("sudo ip route add default via {} dev {} table {}".format(
-			next_hop, tap, self.src_to_table[ip_address], ip_address), shell=True)
-		call("sudo ip route flush cache", shell=True)
+		if not CAREFUL:
+			## set up rule that packets with source address ip_address should go out interface tap
+			next_hop = self.tap_to_nexthop(tap)
+			call("sudo ip rule add from {} table {}".format(ip_address, self.src_to_table[ip_address]), shell=True)
+			call("sudo ip route add default via {} dev {} table {}".format(
+				next_hop, tap, self.src_to_table[ip_address]), shell=True)
+			call("sudo ip route flush cache", shell=True)
 
 	def remove_iptable(self, ip_address, tap):
-		next_hop = self.tap_to_nexthop(tap)
-		call("sudo ip route del default via {} dev {} table {}".format(
-			next_hop, tap, self.src_to_table[ip_address], ip_address), shell=True)	
-		call("sudo ip rule del from {} table {}".format(ip_address, self.src_to_table[ip_address]), shell=True)
-		call("sudo ip route flush cache", shell=True)
+		if not CAREFUL:
+			next_hop = self.tap_to_nexthop(tap)
+			call("sudo ip route del default via {} dev {} table {}".format(
+				next_hop, tap, self.src_to_table[ip_address], ip_address), shell=True)	
+			call("sudo ip rule del from {} table {}".format(ip_address, self.src_to_table[ip_address]), shell=True)
+			call("sudo ip route flush cache", shell=True)
 
 	def run(self, srcs, taps, dsts_sets, **kwargs):
 		## set up tpdump on all interfaces
@@ -115,32 +117,45 @@ class Pinger_Wrapper:
 		target_fn = os.path.join(TMP_DIR, 'tmp_targ_fn.txt')
 		pseudo_timeout = 2
 		OUR_PING_ID = 31415
+
+		## write targets to file
+		srci=0
+		for src, dsts in zip(srcs,dsts_sets):
+			with open(target_fn + str(srci),'w') as f:
+				for targ in dsts:
+					f.write(targ + "\n")
+			srci += 1
+
+		override_sleep_period = kwargs.get('sleep_period', None)
+
 		try:
-
-			for pop in self.pops:
-				call("sudo tcpdump -i {} -n icmp > {} &".format(self.pop_to_intf[pop], pop_to_outfn(pop)), shell=True)
-			# Let these start up
-			time.sleep(5)
-
-			### Time to complete is approximately however many rate limit rounds there are		
-			n_s_per_round = np.max([np.ceil(len(dsts) / self.rate_limit) + \
-				pseudo_timeout for dsts in dsts_sets]) + 3
-			for i in range(self.n_rounds):
-				srci=0
-				for src, dsts in zip(srcs,dsts_sets):
-					np.random.shuffle(dsts)
-					with open(target_fn + str(srci),'w') as f:
-						for targ in dsts:
-							f.write(targ + "\n")
-					cmd = "cat {} | {} -s {} -r {} -i {} &".format(target_fn + str(srci), 
-						PINGER, src, self.rate_limit, OUR_PING_ID + i) 
-					print(cmd)
-					call(cmd, shell=True)
-					srci += 1
-				print("Sleeping {} seconds between probing rounds".format(n_s_per_round))
-				time.sleep(n_s_per_round)
-			# Wait for tcpdump to finish writing
-			time.sleep(10)
+			if not CAREFUL:
+				for pop in self.pops:
+					call("sudo tcpdump -i {} -n icmp > {} &".format(self.pop_to_intf[pop], pop_to_outfn(pop)), shell=True)
+				# Let these start up
+				time.sleep(5)
+				
+				### Time to complete is approximately however many rate limit rounds there are		
+				if override_sleep_period is None:
+					n_s_per_round = np.max([np.ceil(len(dsts) / self.rate_limit) + \
+						pseudo_timeout for dsts in dsts_sets]) + 3
+				else:
+					n_s_per_round = override_sleep_period
+				tstart = time.time()
+				max_time_allowed = n_s_per_round * self.n_rounds
+				for i in range(self.n_rounds):
+					srci=0
+					for src, dsts in zip(srcs,dsts_sets):
+						this_target_fn = target_fn + str(srci)
+						cmd = "cat {} | {} -s {} -r {} -i {} &".format(this_target_fn, 
+							PINGER, src, self.rate_limit, OUR_PING_ID + i) 
+						call(cmd, shell=True)
+						srci += 1
+					time.sleep(n_s_per_round)
+					if time.time() - tstart > max_time_allowed:
+						break
+				# Wait for tcpdump to finish writing
+				time.sleep(10)
 		except:
 			import traceback
 			traceback.print_exc()
@@ -178,7 +193,7 @@ class Pinger_Wrapper:
 			for pop in self.pops:
 				args = (pop, meas_ret, _id_to_meas_i, srcsdict, dstsdict, )
 				rets.append(parse_ping_results(args))
-		for ret in rets: # little complicated to combine
+		for ret in tqdm.tqdm(rets,desc="Parsing all measurements..."): # little complicated to combine
 			for src in ret:
 				for dst in ret[src]:
 					for i,meas in enumerate(ret[src][dst]):
@@ -197,14 +212,14 @@ class Pinger_Wrapper:
 					if meas['t_start'] is not None and meas['t_end'] is not None \
 					 and meas['t_end'] - meas['t_start'] > 0:
 						meas['rtt'] = meas['t_end'] - meas['t_start']
-		if kwargs.get('remove_bad_meas'):
+		if kwargs.get('remove_bad_meas', False):
 			for src in meas_ret:
 				for dst, meas in meas_ret[src].items():
 					for i in reversed(range(len(meas))):
 						if meas[i]['rtt'] is None:
 							del meas[i]
 
-		call("rm {}".format(os.path.join(TMP_DIR, "tcpdumpout*")), shell=True)
+		# call("rm {}".format(os.path.join(TMP_DIR, "tcpdumpout*")), shell=True)
 		return meas_ret
 	
 	def simple_test(self):

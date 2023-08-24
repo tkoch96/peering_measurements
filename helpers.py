@@ -1,4 +1,4 @@
-import numpy as np, csv, socket, struct, os, re, geopy.distance, json, pickle, time
+import numpy as np, csv, socket, struct, os, re, geopy.distance, json, pickle, time, tqdm
 from subprocess import call, check_output
 import geoip2.database
 from bisect import bisect_left
@@ -9,6 +9,20 @@ from config import *
 
 ### This file contains helper functions. I use these helper functions in all my projects
 ### so some of them might be irrelevant.
+
+def parse_anycast_latency_file(fn, ignore_invalid=False):
+	my_anycast_latencies = {}
+	for row in tqdm.tqdm(open(fn,'r'),desc="Parsing anycast latencies from {}".format(fn)):
+		t,ip,lat,pop = row.strip().split(',')
+		if not ignore_invalid:
+			if lat == '-1': continue
+		if float(lat) > 2:
+			continue
+		try:
+			my_anycast_latencies[ip,pop].append(np.maximum(float(lat) * 1000,1))
+		except KeyError:
+			my_anycast_latencies[ip,pop] = [np.maximum(float(lat) * 1000,1)]
+	return my_anycast_latencies
 
 
 def ip32_to_24(ip):
@@ -124,14 +138,15 @@ def single_process_parse(args, **kwargs):
 			continue
 		if i >= lines[1]:
 			continue 
-		_,ip,pop,peer,lat = row.strip().split(',')
+		_,ip,pop,peer,_,lat = row.strip().split(',')
 		if pop not in limit_pops:continue
 		if exclude_providers:
 			if (pop,peer) in provider_popps:
 				continue
 		if int(peer) in EXCLUDE_PEERS:
 			continue
-		lat = np.maximum(float(lat) * 1000,1)
+		# lat = np.maximum(float(lat) * 1000,1)
+		lat = float(lat) * 1000
 		popp = (pop,peer)
 		# try:
 		# 	already_completed[popp]
@@ -153,7 +168,7 @@ def single_process_parse(args, **kwargs):
 		for ip in results['meas_by_ip']:
 			thisipstr = ""
 			for popp,lat in results['meas_by_ip'][ip].items():
-				thisipstr += "{}-{}-{},".format(popp[0],popp[1],lat)
+				thisipstr += "{}--{}--{},".format(popp[0],popp[1],lat)
 			f.write("{},{}\n".format(ip,thisipstr))
 	meas_by_popp_fn = os.path.join(TMP_DIR, 'meas_by_popp-{}.csv'.format(worker_n))
 	with open(meas_by_popp_fn,'w') as f:
@@ -202,7 +217,7 @@ def parse_ingress_latencies_mp(fn):
 			fields = fields[1:]
 			for i in range(len(fields)):
 				if fields[i] == "": continue
-				pop,peer,lat = fields[i].split('-')
+				pop,peer,lat = fields[i].split('--')
 				meas_by_ip[ip][pop,peer] = float(lat)
 		for popp in meas_by_popp:
 			try:
@@ -229,62 +244,62 @@ def parse_ingress_latencies_mp(fn):
 	return {'meas_by_popp': all_meas_by_popp, 'meas_by_ip': all_meas_by_ip}
 
 
-def check_ping_responsive(ips, use_file=False, ret_ping=False,tmpoutfn='tmp.warts'):
-	ret = []
-	out_fn = tmpoutfn
-	if use_file:
-		# ips is the file name
-		scamp_cmd = 'sudo scamper -O warts -c "ping -c 1" -p 10000 -M tak2154atcolumbiadotedu'\
-			' -l peering_interfaces -o {} -f {}'.format(out_fn, ips)
-		try:
-			check_output(scamp_cmd, shell=True)
-			cmd = "sc_warts2json {}".format(out_fn)
-			out = check_output(cmd, shell=True).decode()
-			for meas_str in out.split('\n'):
-				if meas_str == "": continue
-				measurement_obj = json.loads(meas_str)
-				meas_type = measurement_obj['type']
-				if meas_type == 'ping':
-					dst = measurement_obj['dst']
-					if measurement_obj['responses'] != []:
-						if ret_ping:
-							ret.append(measurement_obj)
-						else:
-							ret.append(dst)
-		except:
-			# likely bad input
-			import traceback
-			traceback.print_exc()
-			pass
-	else:
-		n_chunks = len(ips) // 1000 + 1
-		ip_chunks = split_seq(ips,n_chunks)
-		for ip_chunk in ip_chunks:
-			addresses_str = " ".join(ip_chunk)
-			if addresses_str != "":
-				scamp_cmd = 'sudo scamper -O warts -c "ping -c 1" -p 8000 -M tak2154atcolumbiadotedu'\
-					' -l peering_interfaces -o {} -i {}'.format(out_fn, addresses_str)
-				try:
-					check_output(scamp_cmd, shell=True)
-					cmd = "sc_warts2json {}".format(out_fn)
-					out = check_output(cmd, shell=True).decode()
-					for meas_str in out.split('\n'):
-						if meas_str == "": continue
-						measurement_obj = json.loads(meas_str)
-						meas_type = measurement_obj['type']
-						if meas_type == 'ping':
-							dst = measurement_obj['dst']
-							if measurement_obj['responses'] != []:
-								if ret_ping:
-									ret.append(measurement_obj)
-								else:
-									ret.append(dst)
-				except:
-					# likely bad input
-					import traceback
-					traceback.print_exc()
-					pass
-	return ret
+# def check_ping_responsive(ips, use_file=False, ret_ping=False,tmpoutfn='tmp.warts'):
+# 	ret = []
+# 	out_fn = tmpoutfn
+# 	if use_file:
+# 		# ips is the file name
+# 		scamp_cmd = 'sudo scamper -O warts -c "ping -c 1" -p 10000 -M tak2154atcolumbiadotedu'\
+# 			' -l peering_interfaces -o {} -f {}'.format(out_fn, ips)
+# 		try:
+# 			check_output(scamp_cmd, shell=True)
+# 			cmd = "sc_warts2json {}".format(out_fn)
+# 			out = check_output(cmd, shell=True).decode()
+# 			for meas_str in out.split('\n'):
+# 				if meas_str == "": continue
+# 				measurement_obj = json.loads(meas_str)
+# 				meas_type = measurement_obj['type']
+# 				if meas_type == 'ping':
+# 					dst = measurement_obj['dst']
+# 					if measurement_obj['responses'] != []:
+# 						if ret_ping:
+# 							ret.append(measurement_obj)
+# 						else:
+# 							ret.append(dst)
+# 		except:
+# 			# likely bad input
+# 			import traceback
+# 			traceback.print_exc()
+# 			pass
+# 	else:
+# 		n_chunks = len(ips) // 1000 + 1
+# 		ip_chunks = split_seq(ips,n_chunks)
+# 		for ip_chunk in ip_chunks:
+# 			addresses_str = " ".join(ip_chunk)
+# 			if addresses_str != "":
+# 				scamp_cmd = 'sudo scamper -O warts -c "ping -c 1" -p 8000 -M tak2154atcolumbiadotedu'\
+# 					' -l peering_interfaces -o {} -i {}'.format(out_fn, addresses_str)
+# 				try:
+# 					check_output(scamp_cmd, shell=True)
+# 					cmd = "sc_warts2json {}".format(out_fn)
+# 					out = check_output(cmd, shell=True).decode()
+# 					for meas_str in out.split('\n'):
+# 						if meas_str == "": continue
+# 						measurement_obj = json.loads(meas_str)
+# 						meas_type = measurement_obj['type']
+# 						if meas_type == 'ping':
+# 							dst = measurement_obj['dst']
+# 							if measurement_obj['responses'] != []:
+# 								if ret_ping:
+# 									ret.append(measurement_obj)
+# 								else:
+# 									ret.append(dst)
+# 				except:
+# 					# likely bad input
+# 					import traceback
+# 					traceback.print_exc()
+# 					pass
+# 	return ret
 
 def load_bgp_paths_ping_campaign(fn,load_workers=True, **kwargs):
 	ret = {}

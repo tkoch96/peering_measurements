@@ -151,12 +151,14 @@ class AS_Utils_Wrapper:
 				pref,l,asn = row.decode().strip().split('\t')
 				asns = asn.split(",")
 				for asn in asns:
-					asn = self.parse_asn(asn)
-					try:
-						self.routeviews_asn_to_pref[asn].append(pref + "/" + l)
-					except KeyError:
-						self.routeviews_asn_to_pref[asn] = [pref + "/" + l]
-					self.routeviews_pref_to_asn[pref + "/" + l] = asn
+					for _asn in asn.split('_'):
+						_asn = self.parse_asn(_asn)
+						try:
+							self.routeviews_asn_to_pref[_asn].append(pref + "/" + l)
+						except KeyError:
+							self.routeviews_asn_to_pref[_asn] = [pref + "/" + l]
+
+						self.routeviews_pref_to_asn[pref + "/" + l] = _asn
 
 	def check_load_as_rel(self):
 		"""Loads AS relationships if we haven't already. Downloaded from here: 
@@ -164,8 +166,9 @@ class AS_Utils_Wrapper:
 		"""
 		self.check_load_siblings()
 		if self.as_rel == {}:
-			with open(os.path.join(DATA_DIR, "as_relationships_20210201.txt"),'r') as f:
+			with open(os.path.join(DATA_DIR, "20230801.as-rel.txt"),'r') as f:
 				for row in f:
+					if row.startswith("#"): continue
 					fields = row.strip().split('|')
 					as1 = self.parse_asn(fields[0])
 					as2 = self.parse_asn(fields[1])

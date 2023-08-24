@@ -1,3 +1,6 @@
+import matplotlib
+matplotlib.rcParams['pdf.fonttype'] = 42
+matplotlib.rcParams['ps.fonttype'] = 42
 import os, glob, pickle
 import matplotlib.pyplot as plt, numpy as np,tqdm
 
@@ -5,6 +8,49 @@ from config import *
 from helpers import *
 from generic_measurement_utils import AS_Utils_Wrapper
 
+
+def read_lats_over_time():
+	ts = -np.inf
+	te = np.inf
+	i_to_popp = {}
+	i_to_targ = {}
+
+	print("Analyzing from times {} to {}".format(ts,te))
+	lat_fn = os.path.join(CACHE_DIR, "vultr_latency_over_time_case_study.csv")
+	lats_by_targ = {}
+	rowi=0
+	for row in tqdm.tqdm(open(lat_fn, 'r'),desc="reading latency measurements from VULTR."):
+		fields = row.strip().split(',')
+		if len(fields) == 3:
+			pop,peer,i = fields
+			i_to_popp[int(i)] = (pop,peer)
+			continue
+		elif len(fields) == 2:
+			targ,i = fields
+			i_to_targ[int(i)] = targ
+			continue
+		t_meas,client_dsti,poppi,lat = fields
+		if float(t_meas) < ts or float(t_meas) > te: continue 
+		try:
+			lats_by_targ[int(client_dsti)]
+		except KeyError:
+			lats_by_targ[int(client_dsti)] = {}
+		try:
+			lats_by_targ[int(client_dsti)][int(poppi)]
+		except KeyError:
+			lats_by_targ[int(client_dsti)][int(poppi)] = []
+		lat = int(np.ceil(float(lat) * 1000))
+		lats_by_targ[int(client_dsti)][int(poppi)].append((int(t_meas), lat))
+		if rowi == 10000000:
+			break
+		rowi+=1
+
+	print("Read {} lines".format(rowi))
+	return {
+		'lats_by_targ': lats_by_targ,
+		'i_to_popp': i_to_popp,
+		'i_to_targ': i_to_targ,
+	}
 
 
 class Measurement_Analyzer(AS_Utils_Wrapper):
@@ -346,18 +392,61 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		plt.grid(True)
 		self.save_fig("{}_improvements_over_anycast.pdf".format(self.system))
 
+	def compare_with_without_rpki(self):
+		all_rpki_anycast_latencies = parse_anycast_latency_file(os.path.join(CACHE_DIR, '{}_anycast_latency_withrpki.csv'.format(
+			self.system)),ignore_invalid=True)
+		all_nonrpki_anycast_latencies = parse_anycast_latency_file(os.path.join(CACHE_DIR, '{}_anycast_latency_withoutrpki.csv'.format(
+			self.system)), ignore_invalid=True)
+		limit_to = get_intersection(all_rpki_anycast_latencies, all_nonrpki_anycast_latencies)
+
+		rpki_anycast_latencies = parse_anycast_latency_file(os.path.join(CACHE_DIR, '{}_anycast_latency_withrpki.csv'.format(
+			self.system)))
+		nonrpki_anycast_latencies = parse_anycast_latency_file(os.path.join(CACHE_DIR, '{}_anycast_latency_withoutrpki.csv'.format(
+			self.system)))
+
+		in_rpki_not_without = get_difference(rpki_anycast_latencies, nonrpki_anycast_latencies)
+		in_without_not_rpki = get_difference(nonrpki_anycast_latencies, rpki_anycast_latencies)
+		in_both = get_intersection(rpki_anycast_latencies, nonrpki_anycast_latencies)
+
+		in_rpki_not_without = get_intersection(in_rpki_not_without, limit_to)
+		in_without_not_rpki = get_intersection(in_without_not_rpki, limit_to)
+		print("IWNR: {} ".format(in_without_not_rpki[0:10]))
+		in_both = get_intersection(in_both, limit_to)
+
+		print("Total: {} ,Only in RPKI : {}, In Both : {}, Only without RPKI : {}".format(len(limit_to), len(in_rpki_not_without),
+			len(in_both), len(in_without_not_rpki)))
+
+		by_asn = {'rpki_block': {}, 'total': {}}
+		for targ,pop in limit_to:
+			asn = self.parse_asn(targ)
+			try:
+				by_asn['total'][asn].append(targ)
+			except KeyError:
+				by_asn['total'][asn] = [targ]
+		## do they hit the same pop / can pop explain the split behavior
+		## 
+		print("Measured {} ASes total".format(len(by_asn['total'])))
+		for targ,pop in in_rpki_not_without:
+			asn = self.parse_asn(targ)
+			try:
+				by_asn['rpki_block'][asn].append(targ)
+			except KeyError:
+				by_asn['rpki_block'][asn] = [targ]
+		for asn, targs in sorted(by_asn['rpki_block'].items(), key = lambda el : -1 * len(el[1]))[0:100]:
+			print("{} ({}) -- {} targs, {} frac".format(asn,self.org_to_as.get(asn,None),len(targs),len(targs)/len(by_asn['total'][asn])))
+
+		all_fracs = list([len(by_asn['rpki_block'].get(asn,[])) / len(by_asn['total'][asn]) for 
+			asn in by_asn['total']])
+		x,cdf_x = get_cdf_xy(all_fracs)
+		plt.plot(x,cdf_x)
+		plt.xlabel("Fraction of Unresponsive Targets When not RPKI")
+		plt.ylabel("CDF of ASes")
+		plt.grid(True)
+		plt.savefig('figures/rpki_unresponsiveness.pdf')
+
 	def compare_mine_jc_anycast(self):
-		my_anycast_latencies = {}
-		for row in tqdm.tqdm(open(os.path.join(CACHE_DIR, '{}_anycast_latency.csv'.format(
-			self.system))),'r'):
-				t,ip,lat,pop = row.strip().split(',')
-				if lat == '-1': continue
-				if float(lat) > 2:
-					continue
-				try:
-					my_anycast_latencies[ip,pop].append(np.maximum(float(lat) * 1000,1))
-				except KeyError:
-					my_anycast_latencies[ip,pop] = [np.maximum(float(lat) * 1000,1)]
+		my_anycast_latencies = parse_anycast_latency_file(os.path.join(CACHE_DIR, '{}_anycast_latency.csv'.format(
+			self.system)))
 		jc_ip_catchments = {}
 		for row in open(os.path.join(CACHE_DIR, 'jc_{}_anycast_catchment.csv'.format(self.system)),'r'):
 			ip,catchment = row.strip().split('\t')
@@ -382,6 +471,8 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			lat = float(lat)
 			if lat > 2000:continue
 			jc_anycast_latencies_new[ip,jc_ip_catchments[ip]] = lat
+		
+
 		my_anycast_latencies = {k:v for k,v in my_anycast_latencies.items() if len(v) == 2}
 		ips_in_both = get_intersection(my_anycast_latencies,jc_anycast_latencies)
 		print("Comparing {} IPs".format(len(ips_in_both)))
@@ -438,7 +529,7 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		from sklearn.cluster import Birch
 		import pandas as pd
 
-		def check_path_change(lbp,vbp,verb=False):
+		def characterize_time_series(lbp,vbp,verb=False):
 			typical_lats_by_popp = {popp: np.median(lats) for popp,lats in lbp.items()}
 			ranked_lbp = sorted(typical_lats_by_popp.items(), key = lambda el : el[1])
 			best_popp, second_best_popp = ranked_lbp[0][0],ranked_lbp[1][0]
@@ -464,7 +555,7 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			for popp,lats in lbp.items():
 				pdlat = pd.DataFrame(lats)
 				avged_lat = np.array(pdlat.rolling(N_move_average,min_periods=1).median()).flatten()
-				mlat = np.percentile(lats[0:1000],1) # propagation delay
+				mlat = np.percentile(lats,1) # propagation delay
 				lat_mask = (avged_lat > (mlat + 5)).astype(np.int32)
 				## fill in holes via voting
 				hole_filled_lat_mask = np.zeros(len(lat_mask))
@@ -500,49 +591,43 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			}
 
 		if not os.path.exists(cache_fn):
-			te =  1683047238 
-			ts =  te - 48 * 3600 
-			print("Analyzing from times {} to {}".format(ts,te))
-			lat_fn = os.path.join(CACHE_DIR, "{}_latency_over_time_case_study.csv".format(self.system))
-			mean_lats_by_targ, lats_by_targ = {}, {}
-			for row in open(lat_fn, 'r'):
-				t_meas,client_dst,clientpathpop,clientpathpeer,lat = row.strip().split(',')
-				if float(t_meas) < ts or float(t_meas) > te: continue 
-				popp = (clientpathpop, clientpathpeer)
-				try:
-					lats_by_targ[client_dst]
-				except KeyError:
-					lats_by_targ[client_dst] = {}
-				try:
-					lats_by_targ[client_dst][popp]
-				except KeyError:
-					lats_by_targ[client_dst][popp] = []
-				lat = int(np.ceil(float(lat) * 1000))
-				lats_by_targ[client_dst][popp].append((int(t_meas), lat))
 			
+
+			
+			mean_lats_by_targ = {}
+
+
+			ret = read_lats_over_time()
+			lats_by_targ = ret['lats_by_targ']
+			i_to_popp = ret['i_to_popp']
+			i_to_targ = ret['i_to_targ']
+
+			cluster = False
 			brc = None
-			avg_over = 20 # seconds, clustering time
+			avg_over = 3000 # seconds, clustering time
 			loss_by_targ = {}
 			for targ in tqdm.tqdm(lats_by_targ,desc="Post-processing latency data"):
 				n_pts = 0
 				loss_by_targ[targ] = {}
 				mean_lats_by_targ[targ] = 0
 				for popp in lats_by_targ[targ]:
-					if brc is None:
-						ts = np.array([el[0] for el in lats_by_targ[targ][popp]])
-						brc = Birch(threshold=avg_over,n_clusters=None)
-						labels = brc.fit_predict(ts.reshape(-1,1))
-					new_lats = {}
-					for t,lat in lats_by_targ[targ][popp]:
-						t_map = brc.subcluster_centers_[np.argmin(np.abs(brc.subcluster_centers_ - t))][0]
-						try:
-							new_lats[t_map].append(lat)
-						except KeyError:
-							new_lats[t_map] = [lat]
-					new_lats_avg = {t_map: np.mean(new_lats[t_map]) for t_map in new_lats}
-					lats_by_targ[targ][popp] = sorted(new_lats_avg.items(), key = lambda el : el[0])
-					loss_by_targ[targ][popp] = [np.maximum(4 - len(new_lats[t_map]),0) for t_map,_ in lats_by_targ[targ][popp]]
-
+					if cluster:
+						if brc is None:
+							ts = np.array([el[0] for el in lats_by_targ[targ][popp]])
+							brc = Birch(threshold=avg_over,n_clusters=None)
+							labels = brc.fit_predict(ts.reshape(-1,1))
+						new_lats = {}
+						for t,lat in lats_by_targ[targ][popp]:
+							t_map = brc.subcluster_centers_[np.argmin(np.abs(brc.subcluster_centers_ - t))][0]
+							try:
+								new_lats[t_map].append(lat)
+							except KeyError:
+								new_lats[t_map] = [lat]
+						new_lats_avg = {t_map: np.mean(new_lats[t_map]) for t_map in new_lats}
+						lats_by_targ[targ][popp] = sorted(new_lats_avg.items(), key = lambda el : el[0])
+						loss_by_targ[targ][popp] = [np.maximum(4 - len(new_lats[t_map]),0) for t_map,_ in lats_by_targ[targ][popp]]
+					else:
+						loss_by_targ[targ][popp] = np.zeros((len(lats_by_targ[targ]), ))
 					for t,l in lats_by_targ[targ][popp]:
 						mean_lats_by_targ[targ] += l
 						n_pts += 1
@@ -577,30 +662,75 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 					del loss_by_targ[targ]
 				
 
-			pickle.dump([mean_lats_by_targ, lats_by_targ, loss_by_targ], open(cache_fn,'wb'))
+			pickle.dump([mean_lats_by_targ, lats_by_targ, loss_by_targ, i_to_popp, i_to_targ], open(cache_fn,'wb'))
 		else:
-			mean_lats_by_targ, lats_by_targ, loss_by_targ = pickle.load(open(cache_fn,'rb'))
-
+			mean_lats_by_targ, lats_by_targ, loss_by_targ, i_to_popp, i_to_targ = pickle.load(open(cache_fn,'rb'))
+			pass
 		targs = list(lats_by_targ)
 		np.random.shuffle(targs)
 
-		n_targs_by_24 = {}
-		for targ in lats_by_targ:
-			try:
-				n_targs_by_24[ip32_to_24(targ)] += 1
-			except KeyError:
-				n_targs_by_24[ip32_to_24(targ)] = 1
-		# targs = [targ for targ in targs if n_targs_by_24[ip32_to_24(targ)] > 1]
-		# lats_by_targ = {targ:lats_by_targ[targ] for targ in targs}
-
 		## straw man
-		inter_decision_t = 75 # seconds
 		popps = list(set(popp for targ in lats_by_targ for popp in lats_by_targ[targ]))
 		cols = ['red','black','royalblue','magenta','darkorange','forestgreen','tan']
 		popp_to_col = {popp:c for popp,c in zip(popps,cols)}
 
 		popp_to_ind = {popp:i for i,popp in enumerate(popps)}
-		assessed_delta_perfs = {}
+
+
+		# interesting_targs = [targ for targ,perfs in assessed_delta_perfs.items() if any(p > 15 for p in perfs)]
+		interesting_targs = []
+		for targ in tqdm.tqdm(lats_by_targ,desc="Identifying interesting targets to plot."):
+			lats_by_popp = {popp: np.array([el[1] for el in lats_by_targ[targ][popp]]) for popp in lats_by_targ[targ]}
+			var_by_popp = {popp: np.var(lats_by_popp[popp]) for popp in lats_by_popp}
+			ret = characterize_time_series(lats_by_popp, var_by_popp)
+			if ret['has_congestion']:
+				if len(ret['congested_popps'][ret['best_popp']]) > 0:
+					interesting_targs.append((targ,ret))
+
+		plt.rcParams["figure.figsize"] = (40,90)
+		nrows,ncols = 25,8
+		plt_every = 1
+		f,ax = plt.subplots(nrows,ncols)
+		for targi, (targ,ret) in enumerate(sorted(interesting_targs)[0:200]):
+			axrow = targi // ncols
+			axcol = targi % ncols
+			ax2 = ax[axrow,axcol].twinx()
+			for popp in sorted(lats_by_targ[targ]):
+				measx = np.array([el[0] for el in lats_by_targ[targ][popp]])
+				measx = measx - measx[0]
+				measy = np.array([el[1] for el in lats_by_targ[targ][popp]])
+				if len(ret['congested_popps'][popp]) > 0:
+					cbstr = "--".join(["{}-{}".format(int(measx[el[0]]),
+						int(measx[el[1]])) for el in ret['congested_popps'][popp]])
+					lab = "{}-{}".format(i_to_popp[popp],cbstr)
+				else:
+					lab = i_to_popp[popp]
+				ax[axrow,axcol].plot(measx[::plt_every],measy[::plt_every],label=lab,color=popp_to_col[popp])
+
+				lossy = loss_by_targ[targ][popp]
+				ax2.scatter(measx,lossy,color=popp_to_col[popp])
+			ax2.set_ylim([0,4])
+			# ax[axrow,axcol].set_ylim([10,300])
+			ax[axrow,axcol].set_title(i_to_targ[targ])
+			ax[axrow,axcol].legend(fontsize=5)
+		plt.savefig('figures/latency_over_time_interesting_targs.pdf')
+		plt.clf(); plt.close()
+
+
+
+
+
+		# assessed_delta_perfs = {}
+
+		# all_delta_perfs = [el for targ in assessed_delta_perfs for el in assessed_delta_perfs[targ]]
+		# max_by_targ = [np.max(perfs) for targ,perfs in assessed_delta_perfs.items()]
+		# med_by_targ = [np.median(perfs) for targ,perfs in assessed_delta_perfs.items()]
+
+		# ## q: fraction of time we are within X ms of the best?
+		# fracs_within_best = {nms: [sum(1 for p in perfs if p > nms)/len(perfs) for targ,perfs in assessed_delta_perfs.items()] \
+		# 	for nms in [1,3,5,10,15,50,100]}
+
+		# inter_decision_t = 75 # seconds
 		# for targ in tqdm.tqdm(lats_by_targ,desc="Assessing strawman"):
 		# 	boring = True
 		# 	best_overall = None
@@ -677,54 +807,6 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			# 	plt.savefig('figures/tmptarglatovertime.pdf')
 			# 	plt.clf(); plt.close()
 			# 	exit(0)
-
-
-
-		all_delta_perfs = [el for targ in assessed_delta_perfs for el in assessed_delta_perfs[targ]]
-		max_by_targ = [np.max(perfs) for targ,perfs in assessed_delta_perfs.items()]
-		med_by_targ = [np.median(perfs) for targ,perfs in assessed_delta_perfs.items()]
-
-		## q: fraction of time we are within X ms of the best?
-		fracs_within_best = {nms: [sum(1 for p in perfs if p > nms)/len(perfs) for targ,perfs in assessed_delta_perfs.items()] \
-			for nms in [1,3,5,10,15,50,100]}
-
-		# interesting_targs = [targ for targ,perfs in assessed_delta_perfs.items() if any(p > 15 for p in perfs)]
-		interesting_targs = []
-		for targ in tqdm.tqdm(lats_by_targ,desc="Identifying interesting targets to plot."):
-			lats_by_popp = {popp: np.array([el[1] for el in lats_by_targ[targ][popp]]) for popp in lats_by_targ[targ]}
-			var_by_popp = {popp: np.var(lats_by_popp[popp]) for popp in lats_by_popp}
-			ret = check_path_change(lats_by_popp, var_by_popp, verb=(targ=="149.99.22.241"))
-			if ret['has_congestion']:
-				if len(ret['congested_popps'][ret['best_popp']]) > 0:
-					interesting_targs.append((targ,ret))
-
-		plt.rcParams["figure.figsize"] = (40,90)
-		nrows,ncols = 25,8
-		f,ax = plt.subplots(nrows,ncols)
-		for targi, (targ,ret) in enumerate(sorted(interesting_targs)[0:200]):
-			axrow = targi // ncols
-			axcol = targi % ncols
-			ax2 = ax[axrow,axcol].twinx()
-			for popp in sorted(lats_by_targ[targ]):
-				measx = np.array([el[0] for el in lats_by_targ[targ][popp]])
-				measx = measx - measx[0]
-				measy = np.array([el[1] for el in lats_by_targ[targ][popp]])
-				if len(ret['congested_popps'][popp]) > 0:
-					cbstr = "--".join(["{}-{}".format(int(measx[el[0]]),
-						int(measx[el[1]])) for el in ret['congested_popps'][popp]])
-					lab = "{}-{}".format(popp,cbstr)
-				else:
-					lab = popp
-				ax[axrow,axcol].plot(measx[::5],measy[::5],label=lab,color=popp_to_col[popp])
-
-				lossy = loss_by_targ[targ][popp]
-				ax2.scatter(measx,lossy,color=popp_to_col[popp])
-			ax2.set_ylim([0,4])
-			ax[axrow,axcol].set_ylim([10,110])
-			ax[axrow,axcol].set_title(targ)
-			ax[axrow,axcol].legend(fontsize=5)
-		plt.savefig('figures/latency_over_time_interesting_targs.pdf')
-		plt.clf(); plt.close()
 
 
 		plt.rcParams["figure.figsize"] = (5,10)
@@ -814,6 +896,42 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		# plt.savefig('figures/latency_over_time_random_targs.pdf')
 		# plt.clf(); plt.close()
 
+	def user_prefix_impact(self):
+		perfs = {
+			'with_users': {},
+			'without_users': {},
+		}
+
+		for fn, k in zip([os.path.join(CACHE_DIR, '{}_anycast_latency_yunfan.csv'.format(self.system)),
+			os.path.join(CACHE_DIR, '{}_anycast_latency_noyunfan.csv'.format(self.system))], ['with_users', 
+			'without_users']):
+			pops = {}
+			for row in open(fn,'r'):
+				t,dst,l,pop = row.strip().split(',')
+				if l == '-1': continue
+				l = np.minimum(np.maximum(1,float(l) * 1000),500)
+				pops[pop] = None
+				pref = self.routeviews_pref_to_asn.get_key(dst)
+				if pref is None: continue
+				try:
+					perfs[k][pref].append(l)
+				except KeyError:
+					perfs[k][pref] = [l]
+			print("{} -- {} responsive dsts at {} pops".format(k,len(perfs[k]), len(pops)))
+			print(pops.keys())
+			for pref in list(perfs[k]):
+				perfs[k][pref] = np.median(perfs[k][pref])
+		x,cdf_x = get_cdf_xy(list(perfs['with_users'].values()))
+		plt.plot(x,cdf_x,label="With Users")
+		x,cdf_x = get_cdf_xy(list(perfs['without_users'].values()))
+		plt.plot(x,cdf_x,label="Without Users")
+		plt.xlabel("Anycast Latency (ms)")
+		plt.ylabel("CDF of Destinations")
+		plt.legend()
+		plt.grid(True)
+		plt.xlim([0,300])
+		plt.ylim([0,1])
+		plt.savefig('figures/with_without_users_anycast_performance.pdf')
 
 	def get_probing_targets(self):
 		import pytricia
@@ -822,44 +940,64 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		for row in open(os.path.join(CACHE_DIR, 'yunfan_prefixes_with_users.csv')):
 			if row.strip() == 'prefix': continue
 			user_pref_tri[row.strip()] = None
+		print("Loaded {} yunfan prefixes".format(len(user_pref_tri)))
 		targs_in_user_prefs = {}
 
-		pops_of_interest = ['newyork','toronto']
+		pops_of_interest = ['newyork','toronto','atlanta']
 		provider_popps = []
+		n_each_pop = 2
+		pop_ctr = {pop:0 for pop in pops_of_interest}
 		for row in open(os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system))):
 			pop,peer = row.strip().split(',')
 			if pop not in pops_of_interest:
 				continue
+			if pop_ctr[pop] == n_each_pop:
+				continue
+			pop_ctr[pop] += 1
 			provider_popps.append((pop,peer))
+		print(provider_popps)
 
 		# ignore the clouds
 		ignore_ases = [self.parse_asn(asn) for asn in [699,8075,15169,792,37963,36351]]
 
-		for row in tqdm.tqdm(open(os.path.join(CACHE_DIR, '{}_anycast_latency.csv'.format(self.system)),'r'),
-			desc="Parsing anycast latencies."):
-			_,ip,rtt,pop = row.strip().split(",")
-			if rtt == '-1': continue
-			if pop not in pops_of_interest: continue
-			if float(rtt) * 1000 > 100 or float(rtt) * 1000 < 2: continue
+		anycast_latencies = parse_anycast_latency_file(os.path.join(CACHE_DIR, '{}_anycast_latency_withoutrpki.csv'.format(self.system)))
+		print("Loaded {} anycast latencies".format(len(anycast_latencies)))
+		n_valid_latency = 0
+		all_asns = {}
+		self.lookup_asns_if_needed(list(set([ip32_to_24(ip) for ip,pop in anycast_latencies])))
+		for (ip,pop), lats in anycast_latencies.items():
 			parent_pref = user_pref_tri.get_key(ip)
-			# print(ip)
-			# print(parent_pref)
-			# if 
+			lat = np.min(lats)
+			if lat < 2 or lat > 2000: continue
+			n_valid_latency += 1
+
+			ip_asn = self.parse_asn(ip)
+			all_asns[ip_asn] = None
+
 			if parent_pref is not None:
 				parent_key = self.parse_asn(parent_pref)
 				if parent_key in ignore_ases: continue
 				try:
-					targs_in_user_prefs[parent_key].append((ip,float(rtt)*1000))
+					targs_in_user_prefs[parent_key].append((ip,float(lat)*1000))
 				except KeyError:
-					targs_in_user_prefs[parent_key] = [(ip,float(rtt)*1000)]
+					targs_in_user_prefs[parent_key] = [(ip,float(lat)*1000)]
+		print("{} targets with valid latency, {} ASNs".format(n_valid_latency, len(all_asns)))
+		print("There are {} ASNs with pingable targets matching our criteria".format(len(targs_in_user_prefs)))
+		used_prefs = {}
 		with open(probe_target_fn,'w') as f:
 			popps = list(provider_popps)
 			popps = [str(popp[0]) + "|" + str(popp[1]) for popp in popps]
 			popps_str = "-".join(popps)
 			for parent_asn, targslats in targs_in_user_prefs.items():
 				sorted_targs = sorted(targslats, key = lambda el : np.abs(el[1]-20))
-				for t,l in sorted_targs[0:2]:
-					org = self.org_to_as.get(parent_asn, [parent_asn])[0]
+				for t,l in sorted_targs[0:40]:
+					parent_pref = user_pref_tri.get_key(t)
+					try:
+						used_prefs[parent_pref]
+						continue
+					except KeyError:
+						used_prefs[parent_pref] = None
+					# org = self.org_to_as.get(parent_asn, [parent_asn])[0]
 					# f.write("{},{},{}\n".format(org,t,l))
 					f.write("{},{}\n".format(t,popps_str))
 
@@ -876,12 +1014,491 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		# for asn,ct in sorted(asn_ct.items(), key = lambda el : -1 * el[1]):
 		# 	print("{} {} {}".format(asn,self.org_to_as.get(asn,[asn]),ct))
 
+	def unicast_anycast_withdrawal_experiment(self):
+		plot_cache_fn = os.path.join(CACHE_DIR, 'anycast_unicast_withdrawal_quickplotcache.pkl')
+		if not os.path.exists(plot_cache_fn):
+			raw_results = pickle.load(open(os.path.join(CACHE_DIR,
+				'unicast_anycast_experiment_results.pkl'),'rb'))
+			parsed_lats = {}
+			parsed_losses = {}
+			parsed_ts = {}
+			t_start_overall = np.inf
+			t_end_overall = -1 * np.inf
+			for dst in raw_results:
+				for target in raw_results[dst]:
+					try:
+						parsed_lats[target]
+					except KeyError:
+						parsed_lats[target] = {}
+						parsed_losses[target] = {}
+						parsed_ts[target] = {}
+					try:
+						parsed_lats[target][dst]
+					except KeyError:
+						parsed_lats[target][dst] = []
+						parsed_losses[target][dst] = []
+						parsed_ts[target][dst] = []
+					for res in raw_results[dst][target]:
+						if res['t_start'] is None: continue
+						res['t_start'] += TIME_OFFSET
+						parsed_ts[target][dst].append(res['t_start'])
+						if res['rtt'] is None: 
+							parsed_losses[target][dst].append(res['t_start'])
+							continue
+						if res['t_start'] < t_start_overall:
+							t_start_overall = res['t_start']
+						if res['t_start'] > t_end_overall:
+							t_end_overall = res['t_start']
+						parsed_lats[target][dst].append((res['t_start'], res['rtt']))
+			do_plot=True
+			if do_plot:
+				plt.rcParams["figure.figsize"] = (40,90)
+				nrows,ncols = 25,8
+				f,ax = plt.subplots(nrows,ncols)
+			lats_np = {}
+			losses_np = {}
+			loss_aggr_period = 1 # second
+			n_bins_loss = int(np.ceil((t_end_overall - t_start_overall) / loss_aggr_period)) + 1
+			for targi,targ in enumerate(parsed_lats):
+				lats_np[targ] = {}
+				losses_np[targ] = {}
+				for dst in parsed_lats[targ]:
+					if len(parsed_lats[targ][dst]) == 0:continue
+					these_lats = np.array(parsed_lats[targ][dst])
+					t = these_lats[:,0] - t_start_overall
+					losses_np[targ][dst] = np.zeros((2,n_bins_loss))
+					for _t in parsed_ts[targ][dst]:
+						_t = _t - t_start_overall
+						bini = int(_t/loss_aggr_period)
+						losses_np[targ][dst][0,bini] += 1
+					for tloss in parsed_losses[targ][dst]:
+						tloss = tloss - t_start_overall
+						bini = int(tloss/loss_aggr_period)
+						losses_np[targ][dst][1,bini] += 1
+					losses_np[targ][dst] = losses_np[targ][dst][1,:] / (losses_np[targ][dst][0,:] + .00001)
 
+					lats = 1000 * these_lats[:,1]
+					lats_np[targ][dst] = np.array([t,lats])
+					if do_plot:
+						axrow = targi // ncols
+						axcol = targi % ncols
+						if axrow >= nrows or axcol >= ncols:
+							continue
+
+						ax[axrow,axcol].plot(t,lats,label=dst)
+						ax[axrow,axcol].set_title(targ)
+						ax[axrow,axcol].legend(fontsize=5)
+						
+			if do_plot:
+				plt.savefig('figures/unicast_anycast_withdrawal_all_targs.pdf')
+				plt.clf(); plt.close()
+
+			update_times = pickle.load(open('cache/prefix_update_times.pkl','rb'))
+			update_times = np.array(update_times) - t_start_overall
+			bin_freq = 1 # seconds
+			min_ut, max_ut = np.min(update_times), np.max(update_times)
+			n_bins = int(np.ceil((max_ut - min_ut) / bin_freq)) + 1
+			update_ct = np.zeros((n_bins))
+			for ut in update_times:
+				_bin = int((ut - min_ut) // bin_freq)
+				update_ct[_bin] += 1
+			update_times_arr = np.array([np.linspace(min_ut, max_ut, num=len(update_ct)), update_ct])
+			lats_np['ris_updates'] = update_times_arr
+
+			pickle.dump([lats_np,losses_np], open(plot_cache_fn,'wb'))
+		else:
+			try:
+				[lats_np,losses_np] = pickle.load(open(plot_cache_fn,'rb'))
+			except:
+				lats_np = pickle.load(open(plot_cache_fn,'rb')) # backwards compatability
+		targ_of_interest = "138.124.187.148"
+		those_lats = lats_np[targ_of_interest]
+		ris_updates = lats_np['ris_updates']
+
+
+		# Manually finding the blackhole time
+		tms = those_lats['184.164.239.2'][0,:]
+		lts = those_lats['184.164.239.2'][1,:]
+
+		# for t,d in zip(tms[0:-1], np.diff(tms)):
+		# 	if d > .3:
+		# 		print("{} {}".format(t,d))
+		# for t,l,d in zip(tms[0:-1],lts[0:-1], np.diff(lts)):
+		# 	if np.abs(d) > 2.5:
+		# 		print("{} {} {}".format(t,l,d))
+
+		# blackhole_time = 101.28439426422119
+		blackhole_time = 106.79071998596191
+		blackhole_time_i = np.where(tms==blackhole_time)[0][0]
+
+
+		anycast_path_pre = those_lats['184.164.239.1'][:,0:blackhole_time_i]
+		anycast_path_pre[1,:] += 3
+		anycast_path_post = those_lats['184.164.239.2'][:,blackhole_time_i+1:]
+
+		those_lats['anycast'] = np.concatenate([anycast_path_pre,anycast_path_post],axis=1)
+		those_lats['anycastpre'] = anycast_path_pre
+		those_lats['anycastpost'] = anycast_path_post
+
+		self.plot_withdrawal_time_series(those_lats, ris_updates, blackhole_time)
+		for plotnumi in range(6):
+			self.plot_withdrawal_time_series_for_ppt(those_lats, ris_updates, blackhole_time, blackhole_time_i, plotnumi)
+
+	def plot_withdrawal_time_series(self, latency_over_time, ris_updates,
+			blackhole_time):
+		## Time series showing path selection and path latencies
+		start_t = 0
+		blackhole_times = [blackhole_time]
+		chosen_path_times = [(0,'optimal'),(blackhole_time-.2,'suboptimal'),(blackhole_time+1000,'suboptimal')]
+		intf_to_label = { # TODO
+			"184.164.238.1": "Unicast Path",
+			"anycastpre": "Anycast Path",
+			"anycastpost": "Anycast Path",
+			"184.164.240.1": "Alternate Path 1",
+			"184.164.242.1": "Alternate Path 2",
+			"184.164.243.1": "Alternate Path 3",
+		}
+		name_intf_mapping = {
+			'optimal': '184.164.238.1',
+			'suboptimal': '184.164.240.1',
+		}
+		intfs = sorted(list(intf_to_label))
+		f,ax = self.get_figure(fs=21,fw=13)
+		max_y = 95
+		rng=[blackhole_time - 60, blackhole_time + 100]
+		intf_colors = {intf: ['red','blue','brown','tan','salmon','salmon'][i] for i,intf in enumerate(intfs)}
+		painter_color = 'forestgreen'
+		# latency over time
+		for intf in intfs:
+			t_arr = latency_over_time[intf][0,:] - start_t
+			lat_arr = latency_over_time[intf][1,:]
+			ax.plot(t_arr, lat_arr, c=intf_colors[intf])
+
+		anycast_unavailable_length = 1.2#recover_time - blackhole_time
+
+
+		# blackhole events
+		this_blackhole = [t for t in blackhole_times if t>=rng[0] and t<=rng[1]][0]
+		ax.vlines(x=this_blackhole-.3, ymin=0, ymax=max_y, color='k', linestyle='dashed')
+		ax.vlines(x=this_blackhole+anycast_unavailable_length,ymin=0, ymax=max_y, color='r', linestyle='dashed')
+		ax.vlines(x=this_blackhole+60, ymin=0, ymax=max_y, color='y', linestyle='dashed')
+		# ax.annotate("Network\nBlackhole", (this_blackhole+1, 50),fontweight='bold')
+		ax.annotate("   PoP\nFailure", (this_blackhole-10, 84),fontweight='bold', color='white', backgroundcolor='black')
+		# ax.annotate("PAINTER\nPath Choice", (this_blackhole+1, 295), c='forestgreen',fontweight='bold')
+		
+		ax.annotate("   PAINTER\nPath Choices", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
+		ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
+			arrowprops=dict(lw=.4,color=painter_color))
+		ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole+55,43),
+			arrowprops=dict(lw=.4,color=painter_color))
+		
+		
+		# ax.annotate("DNS\nReaction", (this_blackhole+61, 295), c='r', fontweight='bold')
+		ax.annotate("  Normal\nOperation", (this_blackhole-50, 63), c='blue',fontweight='bold',
+			rotation=30)
+		ax.annotate("Unavailable\n Using DNS", (this_blackhole+28, 55), c='y', fontweight='bold',
+			rotation=30)
+		
+		ax.annotate("Unavailable\n Using Anycast", (this_blackhole+4, 58), c='r', 
+			fontweight='bold', rotation=30)
+		ax.annotate("",xytext=(this_blackhole+6,62),xy=(this_blackhole+.5,58),
+			arrowprops=dict(lw=.4,color='red'))
+		
+
+		ax.fill_between(np.linspace(this_blackhole-.3,this_blackhole+anycast_unavailable_length),0,max_y, color='red', alpha=.1)
+		ax.fill_between(np.linspace(this_blackhole+anycast_unavailable_length,this_blackhole+60),0,max_y, color='yellow', alpha=.1)
+		
+		# highlight chosen path
+		for i in range(len(chosen_path_times) - 1):
+			this_t = chosen_path_times[i][0] - start_t
+			next_t = chosen_path_times[i+1][0] - start_t
+			this_path = chosen_path_times[i][1]
+			intf = name_intf_mapping[this_path]
+			data_this_path = latency_over_time[intf]
+			t_arr = data_this_path[0,:] -  start_t
+			inds = [i for i,_t in enumerate(t_arr) if _t > this_t and _t <= next_t]
+			if inds == []: continue
+			# inds = inds + [max(inds) + 1]
+			lat_arr = data_this_path[1,inds]
+			t_arr = t_arr[inds]
+			ax.plot(t_arr,lat_arr,color=painter_color,linewidth=10,alpha=.4)
+			# ax.plot(t_arr,lat_arr,color=intf_colors[intf],linewidth=10,alpha=.4)
+
+		# Label lines by annotation
+		ax.annotate("Anycast Path", (this_blackhole-55, 27), color='salmon')
+		ax.annotate("Unicast Path", (this_blackhole-50, 17), color='chocolate')
+		ax.annotate("Alternate Unicast\n         Paths", (this_blackhole - 55, 52))
+
+		ax.set_ylim([0,max_y])
+		ax.set_xlabel("Time (s)")
+		ax.set_ylabel("RTT Latency (ms)")
+		ax.set_xlim(rng)
+		# set the x labels to be between zero and range length, for presentation purposes
+		labels = [item.get_text() for item in ax.get_xticklabels()]
+		n_labels = len(labels)
+		dlta = (rng[1] - rng[0]) * 1.0 / n_labels
+		for i in range(n_labels):
+			labels[i] = round(dlta * i)
+		ax.set_xticklabels(labels)
+
+
+		ax2col = 'fuchsia'
+		ax2 = ax.twinx()
+		ax2.plot(ris_updates[0,:], ris_updates[1,:], marker='.',color=ax2col, linewidth=2)
+		ax2.set_ylabel("# Anycast Prefix BGP Updates")
+		ax2.yaxis.label.set_color(ax2col)
+		ax2.tick_params(axis='y', colors=ax2col)  
+		ax2.annotate("# BGP Updates", (this_blackhole-45,8), color=ax2col, fontsize=16)  
+
+
+		# axzoom = f.add_axes([.75,.58,.13,.2])
+		# for intf in intfs:
+		# 	t_arr = latency_over_time[intf][0,:] - start_t
+		# 	lat_arr = latency_over_time[intf][1,:]
+		# 	axzoom.plot(t_arr, lat_arr, c=intf_colors[intf])
+
+		# anycast_unavailable_length = 1.2#recover_time - blackhole_time
+
+
+		# # blackhole events
+		# this_blackhole = [t for t in blackhole_times if t>=rng[0] and t<=rng[1]][0]
+		# axzoom.vlines(x=this_blackhole-.3, ymin=0, ymax=max_y, color='k', linestyle='dashed')
+		# axzoom.vlines(x=this_blackhole+anycast_unavailable_length,ymin=0, ymax=max_y, color='r', linestyle='dashed')
+		# axzoom.vlines(x=this_blackhole+60, ymin=0, ymax=max_y, color='y', linestyle='dashed')
+		
+		# axzoom.fill_between(np.linspace(this_blackhole-.3,this_blackhole+anycast_unavailable_length),0,max_y, color='red', alpha=.1)
+		# axzoom.fill_between(np.linspace(this_blackhole+anycast_unavailable_length,this_blackhole+60),0,max_y, color='yellow', alpha=.1)
+
+		# axzoom.annotate("Available Using PAINTER", (blackhole_time-1.3,36),
+		# 	fontweight='bold', fontsize=8, backgroundcolor='white', 
+		# 	color='forestgreen')
+
+		# ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole+77,57),
+		# 	arrowprops=dict(lw=.4,color=painter_color))
+
+		# # highlight chosen path
+		# for i in range(len(chosen_path_times) - 1):
+		# 	this_t = chosen_path_times[i][0] - start_t
+		# 	next_t = chosen_path_times[i+1][0] - start_t
+		# 	this_path = chosen_path_times[i][1]
+		# 	intf = name_intf_mapping[this_path]
+		# 	data_this_path = latency_over_time[intf]
+		# 	t_arr = data_this_path[0,:] -  start_t
+		# 	inds = [i for i,_t in enumerate(t_arr) if _t > this_t and _t <= next_t]
+		# 	if inds == []: continue
+		# 	# inds = inds + [max(inds) + 1]
+		# 	lat_arr = data_this_path[1,inds]
+		# 	t_arr = t_arr[inds]
+		# 	axzoom.plot(t_arr,lat_arr,color=painter_color,linewidth=10,alpha=.4)
+		# axzoom.set_xlim([blackhole_time-1.5,blackhole_time+2.5])
+		# axzoom.set_xticks([])
+		# axzoom.set_yticks([])
+		# axzoom.set_ylim([20,57])
+
+		self.save_fig("system_demonstration_time_series.pdf")
+
+	def plot_withdrawal_time_series_for_ppt(self, latency_over_time, ris_updates,
+			blackhole_time, blackhole_time_i, plotnumi):
+		## Time series showing path selection and path latencies
+		start_t = 0
+		blackhole_times = [blackhole_time]
+		chosen_path_times = [(0,'optimal'),(blackhole_time-.2,'suboptimal'),(blackhole_time+1000,'suboptimal')]
+		intf_to_label = { # TODO
+			"184.164.238.1": "Unicast Path",
+			"anycastpre": "Anycast Path",
+			"anycastpost": "Anycast Path",
+			"184.164.240.1": "Alternate Path 1",
+			"184.164.242.1": "Alternate Path 2",
+			"184.164.243.1": "Alternate Path 3",
+		}
+		name_intf_mapping = {
+			'optimal': '184.164.238.1',
+			'suboptimal': '184.164.240.1',
+		}
+		intfs = sorted(list(intf_to_label))
+		f,ax = self.get_figure(fs=21,fw=13)
+		max_y = 95
+		rng=[blackhole_time - 60, blackhole_time + 100]
+		this_blackhole = [t for t in blackhole_times if t>=rng[0] and t<=rng[1]][0]
+		intf_colors = {intf: ['red','blue','brown','tan','salmon','salmon'][i] for i,intf in enumerate(intfs)}
+		painter_color = 'forestgreen'
+		# latency over time
+		
+		
+		ax.set_ylim([0,max_y])
+		ax.set_xlabel("Time (s)")
+		ax.set_ylabel("RTT Latency (ms)")
+		ax.set_xlim(rng)
+		# set the x labels to be between zero and range length, for presentation purposes
+		labels = [item.get_text() for item in ax.get_xticklabels()]
+		n_labels = len(labels)
+		dlta = (rng[1] - rng[0]) * 1.0 / n_labels
+		for i in range(n_labels):
+			labels[i] = round(dlta * i)
+		ax.set_xticklabels(labels)
+		if plotnumi == 0:
+			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
+			return
+
+		ax.annotate("Anycast Path", (this_blackhole-55, 27), color='salmon')
+		ax.annotate("PAINTER Advertised\n Paths", (this_blackhole - 55, 57))
+		for intf in intfs:
+			t_arr = latency_over_time[intf][0,:] - start_t
+			lat_arr = latency_over_time[intf][1,:]
+			if t_arr[0] > blackhole_time -5: continue
+			ax.plot(t_arr[0:blackhole_time_i], lat_arr[0:blackhole_time_i], c=intf_colors[intf])
+
+
+		ax.annotate("  Normal\nOperation", (this_blackhole-50, 73), c='blue',fontweight='bold',
+			rotation=30)
+		anycast_unavailable_length = 1.2#recover_time - blackhole_time
+		if plotnumi == 1:
+			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
+			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
+				arrowprops=dict(lw=.4,color=painter_color))
+			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
+			return
+
+
+		# blackhole events
+		ax.vlines(x=this_blackhole-.3, ymin=0, ymax=max_y, color='k', linestyle='dashed')
+		ax.annotate("   PoP\nFailure", (this_blackhole-10, 84),fontweight='bold', color='white', backgroundcolor='black')
+		if plotnumi == 2:
+			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
+			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
+				arrowprops=dict(lw=.4,color=painter_color))
+			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
+			return
+
+		for intf in intfs:
+			t_arr = latency_over_time[intf][0,:] - start_t
+			lat_arr = latency_over_time[intf][1,:]
+			ax.plot(t_arr, lat_arr, c=intf_colors[intf])
+		if plotnumi == 3:
+			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
+			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
+				arrowprops=dict(lw=.4,color=painter_color))
+			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
+			return
+		
+
+		ax.vlines(x=this_blackhole+anycast_unavailable_length,ymin=0, ymax=max_y, color='r', linestyle='dashed')
+		ax.annotate("Unavailable\n Using Anycast", (this_blackhole+4, 58), c='r', 
+			fontweight='bold', rotation=30)
+		ax.annotate("",xytext=(this_blackhole+6,62),xy=(this_blackhole+.5,58),
+			arrowprops=dict(lw=.4,color='red'))
+		ax.fill_between(np.linspace(this_blackhole-.3,this_blackhole+anycast_unavailable_length),0,max_y, color='red', alpha=.1)
+		if plotnumi == 4:
+			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
+			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
+				arrowprops=dict(lw=.4,color=painter_color))
+			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
+			return
+
+
+		ax.vlines(x=this_blackhole+60, ymin=0, ymax=max_y, color='y', linestyle='dashed')
+		ax.annotate("Unavailable\n Using DNS", (this_blackhole+28, 55), c='y', fontweight='bold',
+		rotation=30)
+		# ax.annotate("Network\nBlackhole", (this_blackhole+1, 50),fontweight='bold')
+		# ax.annotate("PAINTER\nPath Choice", (this_blackhole+1, 295), c='forestgreen',fontweight='bold')
+		ax.fill_between(np.linspace(this_blackhole+anycast_unavailable_length,this_blackhole+60),0,max_y, color='yellow', alpha=.1)
+		if plotnumi == 5:
+			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
+			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
+				arrowprops=dict(lw=.4,color=painter_color))
+			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
+			return
+		
+
+		ax.annotate("   PAINTER\nPath Choices", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
+		ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
+			arrowprops=dict(lw=.4,color=painter_color))
+		ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole+55,43),
+			arrowprops=dict(lw=.4,color=painter_color))
+		# highlight chosen path
+		for i in range(len(chosen_path_times) - 1):
+			this_t = chosen_path_times[i][0] - start_t
+			next_t = chosen_path_times[i+1][0] - start_t
+			this_path = chosen_path_times[i][1]
+			intf = name_intf_mapping[this_path]
+			data_this_path = latency_over_time[intf]
+			t_arr = data_this_path[0,:] -  start_t
+			inds = [i for i,_t in enumerate(t_arr) if _t > this_t and _t <= next_t]
+			if inds == []: continue
+			# inds = inds + [max(inds) + 1]
+			lat_arr = data_this_path[1,inds]
+			t_arr = t_arr[inds]
+			ax.plot(t_arr,lat_arr,color=painter_color,linewidth=10,alpha=.4)
+			# ax.plot(t_arr,lat_arr,color=intf_colors[intf],linewidth=10,alpha=.4)
+		if plotnumi == 6:
+			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
+			return
+
+	def save_fig(self, fig_file_name):
+		# helper function to save to specific figure directory
+		# plt.grid(True)
+		plt.savefig(os.path.join('figures', fig_file_name),bbox_inches='tight')
+		plt.clf()
+		plt.close()
+
+	def find_targs_unicast_anycast_withdrawal_experiment(self):
+		ret = read_lats_over_time()
+		lats_by_targ = ret['lats_by_targ']
+		i_to_popp = ret['i_to_popp']
+		i_to_targ = ret['i_to_targ']
+
+
+		targ_to_i = {targ:i for i,targ in i_to_targ.items()}
+		popp_to_i = {popp:i for i,popp in i_to_popp.items()}
+
+		atlanta_popps = list([popp for popp in popp_to_i if popp[0] == 'atlanta'])
+
+
+		anycast_lats = parse_anycast_latency_file(os.path.join(CACHE_DIR, 'vultr_anycast_latency.csv'))
+
+		valid_targs = []
+		for targ, pop in anycast_lats:
+			if pop != 'newyork':
+				continue
+			if np.min(anycast_lats[targ,pop]) > 100: continue
+			try:
+				lats = lats_by_targ[targ_to_i[targ]]
+			except KeyError:
+				continue
+			new_lats = {}
+			for poppi,latsseries in lats.items():
+				popp = i_to_popp[poppi]
+				new_lats[popp] = np.min([el[1] for el in latsseries])
+			## 1 - best provider latency is better than anycast
+			## 2 - differences in atlanta latencies by a few ms
+			sorted_lats = sorted(new_lats.items(), key = lambda el : el[1])
+			if sorted_lats[0][0][0] == 'newyork' and sorted_lats[0][1] < anycast_lats[targ,pop]:
+				atlanta_lats = list([new_lats[atlanta_popp] for atlanta_popp in new_lats if atlanta_popp[0] == 'atlanta'])
+				if len(atlanta_lats) == 0: continue
+				if np.abs(np.min(atlanta_lats) - np.max(atlanta_lats)) > 4:
+					valid_targs.append(targ)
+
+		for targ in valid_targs:
+			lats = lats_by_targ[targ_to_i[targ]]
+			new_lats = {}
+			for poppi,latsseries in lats.items():
+				popp = i_to_popp[poppi]
+				new_lats[popp] = np.min([el[0] for el in latsseries])
+			print("{} -- {}".format(targ,new_lats))
+
+		with open('cache/unicast_anycast_withdrawal_targs.csv', 'w') as f:
+			for targ in valid_targs:
+				f.write(targ + "\n")
 
 
 if __name__ == "__main__":
 	ma = Measurement_Analyzer()
-	ma.get_probing_targets()
+	# ma.compare_with_without_rpki()
+	# ma.get_probing_targets()
+	# ma.user_prefix_impact()
+	# ma.get_probing_targets()
 	# ma.plot_lat_over_time()
 	# ma.characterize_per_ingress_measurements()
 	# ma.prune_per_ingress_measurements()
+	# ma.find_targs_unicast_anycast_withdrawal_experiment()
+	ma.unicast_anycast_withdrawal_experiment()

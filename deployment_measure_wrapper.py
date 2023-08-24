@@ -4,13 +4,20 @@ from helpers import *
 from subprocess import call, check_output
 import subprocess
 from generic_measurement_utils import AS_Utils_Wrapper
+from pinger_wrapper import Pinger_Wrapper
+
+asn_to_clients_fn = os.path.join(CACHE_DIR, 'asn_to_probable_clients.csv')
 
 class Deployment_Measure_Wrapper():
 	def __init__(self, **kwargs):
 
 		self.utils = AS_Utils_Wrapper()
+		self.utils.check_load_siblings()
 		self.utils.check_load_as_rel()
 		self.utils.update_cc_cache()
+
+		#### Speeds up loading everything considerably if you set this to false
+		self.recalc_probable_clients = False
 
 		self.addresses_that_respond_to_ping_fn = os.path.join(DATA_DIR, "addresses_that_respond_to_ping.csv")
 		all_muxes_str = check_output("sudo client/peering openvpn status", shell=True).decode().split('\n')
@@ -28,14 +35,19 @@ class Deployment_Measure_Wrapper():
 			assert len(this_mux_str) == 1
 			this_mux_str = this_mux_str[0]
 			self.pop_to_intf[pop] = "tap" + re.search("tap(\d+)", this_mux_str).group(1)
-		
+
 		### prefixes we can conduct experiments with
 		self.available_prefixes = ["184.164.238.0/24","184.164.239.0/24","184.164.240.0/24", 
 			"184.164.241.0/24","184.164.242.0/24","184.164.243.0/24"]
+		# self.available_prefixes = ["184.164.238.0/24","184.164.239.0/24","184.164.240.0/24", 
+		# 	"184.164.242.0/24","184.164.243.0/24"]
+
+		# self.available_prefixes = ['138.185.230.0/24']
 		self.rfd_track_fn = os.path.join(CACHE_DIR, 'rfd_tracking.csv')
 		self.active_experiments = {}
+		self.limit_to_yunfan = kwargs.get('limit_to_yunfan', False)
 
-		popps = csv.DictReader(open(os.path.join(DATA_DIR, "{}_peers.csv".format(self.system)), 'r'))
+		popps = csv.DictReader(open(os.path.join(DATA_DIR, "{}_peers_inferred.csv".format(self.system)), 'r'))
 		self.peers = {}
 		self.peer_to_id = {}
 
@@ -59,47 +71,86 @@ class Deployment_Measure_Wrapper():
 				self.peer_macs[pop] = {}
 
 		### All connections (ingresses), learned from BGP routes
-		self.popps = []
+		self.popps = {}
+		self.pop_to_ixps = {}
+		self.popps_to_ixps = {}
+		provider_popp_fn = os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system))
 		for row in popps:
 			if self.system == "peering":
 				pop, peer, session_id = row["BGP Mux"], row["Peer ASN"], row["Session ID"]
 				if ":" in row["Peer IP address"]: continue
+				try:
+					self.peers[pop].append(peer)
+				except KeyError:
+					self.peers[pop] = [peer]
+				try:
+					self.peer_to_id[pop,peer]
+					# print("Warning -- multiple session ID's for {} {}".format(pop,peer))
+				except KeyError:
+					self.peer_to_id[pop,peer] = session_id
+				self.popps[pop,peer] = None
 			elif self.system == "vultr":
-				pop, peer, nh = row["pop"], row["peer"], row["next_hop"]
-				session_id = peer #### Whats used by the -c option to identify a peer.. idk what this should be
-			try:
-				self.peers[pop].append(peer)
-			except KeyError:
-				self.peers[pop] = [peer]
-			try:
-				self.peer_to_id[pop,peer]
-				# print("Warning -- multiple session ID's for {} {}".format(pop,peer))
-			except KeyError:
-				self.peer_to_id[pop,peer] = session_id
-			self.popps.append((pop,peer))
+				pop, peer, nh, tp, ixp = row["pop"], row["peer"], row["next_hop"], row["type"], row["ixp"]
+				try:
+					self.peers[pop].append(peer)
+				except KeyError:
+					self.peers[pop] = [peer]
+				try:
+					self.popps[pop,peer].append(tp)
+				except KeyError:
+					self.popps[pop,peer] = [tp]
+				if ixp != '':
+					try:
+						self.popps_to_ixps[pop,peer][ixp] = None
+					except KeyError:
+						self.popps_to_ixps[pop,peer] = {ixp: None}
+					try:
+						self.pop_to_ixps[pop][ixp] = None
+					except KeyError:
+						self.pop_to_ixps[pop] = {ixp:None}
+		print(self.pop_to_ixps)
+		print(list(set([ixp for pop in self.pop_to_ixps for ixp in self.pop_to_ixps[pop]])))
+
+		if self.system == 'vultr':
+			# for popp,tps in self.popps.items():
+			# 	tps = list(sorted(set(tps)))
+			# 	if len(tps) > 1: 
+			# 		if tps == ['privatepeer', 'provider']:
+			# 			self.popps[popp] = 'provider'
+			# 		elif tps == ['provider', 'routeserver']:
+			# 			self.popps[popp] = 'provider'
+			# 		elif tps == ['privatepeer','provider','routeserver']:
+			# 			self.popps[popp] = 'provider'
+			# 		elif tps == ['privatepeer', 'routeserver']:
+			# 			self.popps[popp] = 'private_peer'check_construct_client_to_peer_mapping
+			# 		elif tps == ['ixp_direct', 'routeserver']:
+			# 			self.popps[popp] = 'ixp_direct'
+			# 	else:
+			# 		self.popps[popp] = tps[0]
+			with open(provider_popp_fn, 'w') as f:
+				for popp,rels in self.popps.items():
+					if 'provider' in rels:
+						f.write("{},{}\n".format(popp[0],popp[1]))
+			community_ixps = ['45686','26162','24115']
+			self.no_community_ixps = list(set([ixp for pop in self.pop_to_ixps for ixp in self.pop_to_ixps[pop]]))
+			self.no_community_ixps = get_difference(self.no_community_ixps, community_ixps)
+
+		self.peer_to_pops = {}
 		for pop in self.peers:
 			self.peers[pop] = list(set(self.peers[pop])) # remove dups
+			for peer in self.peers[pop]:
+				try:
+					self.peer_to_pops[peer].append(pop)
+				except KeyError:
+					self.peer_to_pops[peer] = [pop]
 
 		### Providers, learned from BGP routes
-		self.provider_popps = []
-		for row in open(os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system)),'r'):
+		self.provider_popps, self.provider_peers = [], []
+		for row in open(provider_popp_fn,'r'):
 			self.provider_popps.append(tuple(row.strip().split(',')))
+			self.provider_peers.append(self.provider_popps[-1][1])
+		self.provider_peers = list(set(self.provider_peers))
 
-		self.reachable_dsts, self.measured_to = {}, {}
-		if os.path.exists(os.path.join(DATA_DIR, "client_lats_{}.csv".format(self.system))):
-			with open(os.path.join(DATA_DIR, "client_lats_{}.csv".format(self.system)), 'r') as f:
-				for row in f:
-					if row.startswith("ip"): continue
-					client_dst, peer, rtt = row.strip().split('\t')
-					if rtt != '-1':
-						try:
-							self.reachable_dsts[peer].append(client_dst)
-						except KeyError:
-							self.reachable_dsts[peer] = [client_dst]
-					try:
-						self.measured_to[peer].append(client_dst)
-					except KeyError:
-						self.measured_to[peer] = [client_dst]
 		self.pop_to_loc = POP_TO_LOC[self.system]
 		self.pop_vpn_lats = {}
 		self.pop_vpn_lats_fn = os.path.join(CACHE_DIR, 'pop_vpn_lats_{}.pkl'.format(self.system))
@@ -145,21 +196,9 @@ class Deployment_Measure_Wrapper():
 			self.pop_to_loc = {pop:self.pop_to_loc[pop] for pop in self.include_pops}
 			self.pops = self.include_pops
 		print("Working with PoPs : {}".format(self.pops))
-
 		if kwargs.get('quickinit', False): return
 
-		## Natural client to PoP mapping for an anycast advertisement, learned from measurements
-		self.pop_to_clients = {pop:[] for pop in self.pops}
-		self.pop_to_clients_fn = os.path.join(DATA_DIR, 'client_to_pop.csv')
-		self.client_to_pop = {}
-		if os.path.exists(self.pop_to_clients_fn):
-			for row in open(self.pop_to_clients_fn, 'r'):
-				client,pop = row.strip().split(',')
-				if self.limit_pops:
-					if pop not in self.include_pops:
-						continue
-				self.pop_to_clients[pop].append(client)
-				self.client_to_pop[client] = pop
+		
 		## clients that switch between pops, annoying
 		self.multipop_clients_fn = os.path.join(DATA_DIR, 'multipop_clients.csv')
 		self.multipop_clients = []
@@ -168,110 +207,20 @@ class Deployment_Measure_Wrapper():
 				client = row.strip()
 				self.multipop_clients.append(client)
 
-		load_msft = False
-		self.all_client_addresses_from_msft = set()
-		if load_msft:
-			## perhaps reachable addresses for clients
-			self.dst_to_ug = {}
-			self.ug_to_vol = {}
-			for row in tqdm.tqdm(csv.DictReader(open(os.path.join(DATA_DIR,
-				'client24_metro_vol_20220620.csv'),'r')), desc="Loading Microsoft user data"):
-				ug = (row['metro'], row['asn'])
-				try:
-					self.ug_to_vol[ug] += float(row['N'])
-				except KeyError:
-					self.ug_to_vol[ug] = float(row['N'])
-				self.dst_to_ug[row['client_24']] = ug
-				if np.random.random() > .9999:
-					break
-			# reachable_addr_metro_asn.kql, 5 days
-			self.all_client_addresses_from_msft = {}
-			ug_to_loc = {}
-			for row in tqdm.tqdm(csv.DictReader(open(os.path.join(DATA_DIR, 
-				'reachable_addr_metro_asn_5d.csv'),'r')),desc="Loading reachable addresses."):
-				ug = (row['metro'],row['asn'])
-				if ":" not in row['reachable_addr'] and row['reachable_addr'] != '':
-					self.all_client_addresses_from_msft[row['reachable_addr']] = None
-					self.dst_to_ug[ip32_to_24(row['reachable_addr'])] = ug
-				if ":" not in row['reachable_addr']:
-					ug_to_loc[ug] = (float(row['lat']), float(row['lon']))
-					try:
-						self.ug_to_vol[ug] += float(row['N'])
-					except KeyError:
-						self.ug_to_vol[ug] = float(row['N'])
-					
-			self.all_client_addresses_from_msft = set(self.all_client_addresses_from_msft)
-
-		for fn in tqdm.tqdm(glob.glob(os.path.join(DATA_DIR, "hitlist_from_jiangchen", "*")),
-			desc="Loading hitlists from JC"):
-			if self.limit_pops:
-				pop = re.search("anycast\_ip\_(.+)\.txt",fn).group(1)
-				if pop not in self.include_pops:
-					continue
-			these_ips = set([row.strip() for row in open(fn,'r').readlines()])
-			self.all_client_addresses_from_msft = self.all_client_addresses_from_msft.union(these_ips)
-		self.all_client_addresses_from_msft = get_difference(self.all_client_addresses_from_msft, self.multipop_clients)
 		## we've measured from all destinations to these popps
 		self.already_completed_popps_fn = os.path.join(CACHE_DIR, 'already_completed_popps.csv')
 
-		
-		if load_msft:
-			self.check_load_addresses_that_respond_to_ping()
-			ugs_in_ping = {}
-
-			for ip in self.addresses_that_respond_to_ping[1]:
-				ntwrk = ip32_to_24(ip)
-				try:
-					ugs_in_ping[self.dst_to_ug[ntwrk]] = None
-				except KeyError:
-					pass
-			print("{} UGs thus far respond to ping, {} pct of volume".format(len(ugs_in_ping),
-				sum(self.ug_to_vol[ug] for ug in ugs_in_ping) * 100.0 / sum(list(self.ug_to_vol.values()))))
-			with open(os.path.join(CACHE_DIR, '{}_used_ug_locs.csv'.format(self.system)), 'w') as f:
-				for ug in ug_to_loc:
-					lat,lon = ug_to_loc[ug]
-					f.write("{},{},{}\n".format(lat,lon,self.ug_to_vol[ug]))
-
 		### Get AS to org mapping and vice versa for compatibility with PAINTER pipeline
 		peer_to_org_fn = os.path.join(CACHE_DIR, 'vultr_peer_to_org.csv')
-		self.peer_to_org,self.org_to_peer = {}, {}
-		for row in open(peer_to_org_fn,'r'):
-			peer,org = row.strip().split(',')
-			if int(org) >= 1e6:
-				org = int(org)
-			else:
-				org = org.strip()
-			try:
-				self.org_to_peer[org].append(peer.strip())
-			except KeyError:
-				self.org_to_peer[org] = [peer.strip()]
-			self.peer_to_org[peer] = org
-		for org in self.org_to_peer:
-			self.org_to_peer[org] = list(set(self.org_to_peer[org]))
+		peer_orgs = list(set(self.utils.parse_asn(peer) for pop,peer in self.popps))
+		with open(peer_to_org_fn, 'w') as f:
+			for peer_org in peer_orgs:
+				asns = self.utils.org_to_as.get(peer_org, [])
+				if len(asns) > 0:
+					asns_str = "-".join(sorted(asns))
+					f.write("{},{}\n".format(peer_org,asns_str))
 
 		self.maximum_inflation = kwargs.get('maximum_inflation', 1)
-
-		if load_msft:
-			## Free up memory
-			del self.dst_to_ug
-			del self.ug_to_vol
-
-	def pop_to_close_clients(self, pop):
-		### measure to any client whose catchment is within some number of km
-		try:
-			self.pop_to_close_clients_cache
-		except AttributeError:
-			self.pop_to_close_clients_cache = {}
-		try:
-			return self.pop_to_close_clients_cache[pop]
-		except KeyError:
-			pass
-		ret = set()
-		for p in self.pop_to_loc:
-			if geopy.distance.geodesic(self.pop_to_loc[p],self.pop_to_loc[pop]).km < 5000:
-				ret = ret.union(self.pop_to_clients[p])
-		self.pop_to_close_clients_cache[pop] = ret
-		return ret
 
 	### Route flap damping tracker, to ensure we don't advertise or withdraw too frequently
 	def get_rfd_obj(self):
@@ -356,6 +305,95 @@ class Deployment_Measure_Wrapper():
 			return check_output(cmd,shell=True)
 			self.track_rfd(cmd, **kwargs)
 
+	def ixp_to_limit_str(self, ixp, peers):
+		community_str = ""
+		if ixp == '45686':
+			## JPNAP, Euro-IX standard https://www.euro-ix.net/en/forixps/large-bgp-communities/
+			community_str = "-c 45686,0,0 " # no export
+			for peer in peers:
+				community_str += "-l 45686,1,{} ".format(peer) # override no export to this peer
+		elif ixp == '26162':
+			## NIC.BR http://docs.ix.br/doc/politica-de-tratamento-de-communities-no-ix-br-v4_3.pdf
+			for peer in peers:
+				community_str += "-l 65001,0,{} ".format(peer)
+		elif ixp == '24115':
+			## Equinix, docs here https://deploy.equinix.com/developers/docs/metal/bgp/global-communities/
+			## but I got this community from VULTR support
+			for peer in peers:
+				community_str += "-l 24115,1,{} ".format(peer)
+		else:
+			print("WARNING : IXP {} not implemented in ixp_to_limit_str".format(ixp))
+		return community_str
+
+	def get_communtiy_str_vultr_adv_to_peers(self, pop, peers):
+		#### Basic version, ignore all routeservers
+
+		community_str = ""
+		peers_filtered = list([peer for peer in peers if int(peer) <= 65000])
+		if len(peers_filtered) != len(peers):
+			print("Note -- ignoring some peers as larger ASNs not yet supported.")
+		if len(peers_filtered) == 0:
+			raise ValueError("must be nonzero number of peers")
+
+		community_str += "-c 20473,6000 "
+
+		for peer in peers:
+			community_str += "-c 64699,{} ".format(peer)
+
+		### Be superstitious and actively exclude providers
+		providers_this_pop = [popp[1] for popp in self.provider_popps if popp[0] == pop]
+		for exclude_provider in get_difference(providers_this_pop, peers):
+			community_str += "-c 64600,{} ".format(exclude_provider)
+
+		return community_str
+
+	def get_communtiy_str_vultr_adv_to_peers_new(self, pop, peers):
+		### ideally would include all ixp-specific rules
+		community_str = ""
+		peers_filtered = list([peer for peer in peers if int(peer) <= 65000])
+		if len(peers_filtered) != len(peers):
+			print("Note -- ignoring some peers as larger ASNs not yet supported.")
+		if len(peers_filtered) == 0:
+			raise ValueError("must be nonzero number of peers")
+		non_ixp_peers_include = [peer for peer in peers_filtered if self.popps[pop,peer] != 'routeserver']
+		non_ixp_peers_excldue = get_difference([peer for _pop,peer in self.popps if _pop == pop], non_ixp_peers_include)
+		for non_ixp_peer_exclude in non_ixp_peers_excldue:
+			community_str += '-c 64600,{} '.format(non_ixp_peer_exclude)
+		
+		ixp_peers = get_difference(peers_filtered, non_ixp_peers)
+		ixps_at_pop_not_used = [] ## TODO : want to fully block to any ixp we aren't using
+
+		if len(ixp_peers) > 0:
+			all_ixps = self.pop_to_ixps[pop]
+			ixps_used = list(set(ixp for peer in ixp_peers for ixp in self.popps_to_ixps[pop,peer]))
+			unused_ixps = get_difference(all_ixps, ixps_used)
+			for ixp in unused_ixps:
+				# dont advertise
+				community_str += '-c 64600,{} '.format(ixp)
+			for ixp in ixps_used:
+				# override dont export
+				if ixp in self.no_community_ixps:
+					## We can't limit advertisements, so block all advertisements to this IXP
+					## maybe don't need this
+					community_str += '-c 64600,{} '.format(ixp)
+					continue
+				## override don't export with export specifically to ixp
+				community_str += '-c 64699,{} '.format(ixp)
+			peers_by_ixp = {}
+			for peer in ixp_peers:
+				for ixp in self.popps_to_ixps[pop,peer]:
+					try:
+						peers_by_ixp[ixp].append(peer)
+					except KeyError:
+						peers_by_ixp[ixp] = [peer]
+					#### Just use one IXP, since routing is very likely the same to all
+					break
+			for ixp,this_ixp_peers in peers_by_ixp.items():
+				if ixp in self.no_community_ixps: continue
+				community_str += self.ixp_to_limit_str(ixp,this_ixp_peers)
+		return community_str	
+
+
 	def advertise_to_peers(self, pop, peers, pref, **kwargs):
 		## check to make sure we're not advertising already
 		cmd_out = self._check_output("sudo client/peering bgp adv {}".format(pop),careful=CAREFUL)
@@ -369,7 +407,7 @@ class Deployment_Measure_Wrapper():
 				pop, self.peer_to_id[pop, peer], pref),careful=CAREFUL, **kwargs)
 		elif self.system == 'vultr':
 			#https://github.com/vultr/vultr-docs/tree/main/faq/as20473-bgp-customer-guide#readme
-			community_str = " -c 20473,6000 " + " ".join(["-c 64699,{}".format(self.peer_to_id[pop, peer]) for peer in peers])
+			community_str = self.get_communtiy_str_vultr_adv_to_peers(pop, peers)				
 			self._call("sudo client/peering prefix announce -m {} {} {}".format(
 				pop, community_str, pref),careful=CAREFUL, **kwargs)
 			pass
@@ -386,11 +424,19 @@ class Deployment_Measure_Wrapper():
 		for pop, peers in popps_by_pop.items():
 			self.advertise_to_peers(pop, peers, pref, override_rfd=(i>0))
 			i += 1
+		if not CAREFUL:
+			time.sleep(30) # route convergence
 
 	def advertise_to_pop(self, pop, pref, **kwargs):
 		## Advertises to all peers at a single pop
 		self._call("sudo client/peering prefix announce -m {} {}".format(
-				pop, pref),careful=CAREFUL,**kwargs) 
+				pop, pref),careful=CAREFUL,**kwargs)
+
+	def advertise_to_pops(self, pops, pref, **kwargs):
+		for i,pop in enumerate(pops):
+			## Advertises to all peers at a single pop
+			self._call("sudo client/peering prefix announce -m {} {}".format(
+					pop, pref),careful=CAREFUL,**kwargs,override_rfd=(i>0)) 
 
 	def withdraw_from_pop(self, pop, pref):
 		if self.system == 'peering':
@@ -399,7 +445,7 @@ class Deployment_Measure_Wrapper():
 				pop, self.peer_to_id[pop, peer], pref),careful=CAREFUL)
 		elif self.system == 'vultr':
 			# just do the opposite of advertise
-			self._call("sudo client/peering prefix withdraw -m {} {}".format(
+			self._call("sudo client/peering prefix withdraw -m {} {} &".format(
 				pop, pref),careful=CAREFUL)
 
 	def announce_anycast(self, pref=None):
@@ -468,7 +514,7 @@ class Deployment_Measure_Wrapper():
 		if exclude_providers:
 			popps_to_focus_on = get_difference(all_popps, self.provider_popps)
 
-		popps_to_focus_on = get_intersection(popps_to_focus_on, self.popp_to_clients) # focus on popps with clients
+		popps_to_focus_on = get_intersection(popps_to_focus_on, self.popp_to_clientasn) # focus on popps with clients
 		# TODO -- implement larger ASNs
 		popps_to_focus_on = [popp for popp in popps_to_focus_on if int(popp[1]) <= 65000]
 
@@ -550,6 +596,10 @@ class Deployment_Measure_Wrapper():
 						n_fails = 0
 						break
 					else:
+						if np.random.random() > .9:
+							print("{} -- {}, intersection: {}".format(
+								p,entry,get_intersection(this_clients_set,compare_clients_set)))
+							exit(0)
 						n_fails += 1
 						# shortcut -- assume that if it takes enough iters then there just won't be anything else
 						if n_fails == 20: 
@@ -566,249 +616,228 @@ class Deployment_Measure_Wrapper():
 				break
 		return ret
 
+	def get_clients_by_popp(self, popps, verb=False):
+		self.check_construct_client_to_peer_mapping()
+		every_client_of_interest = self.get_reachable_clients()
+		if popps == 'all':
+			## return every client in a list
+			return every_client_of_interest
+		else:
+			# return popp -> clients
+			ret = {}
+			for popp in popps:
+				if popp in self.provider_popps: continue # trivial
+				ret[popp] = []
+				for asn in self.popp_to_clientasn.get(popp,[]):
+					ret[popp] += self.asn_to_clients.get(asn,[])
+					if verb:
+						if len(ret[popp]) == 0:
+							print("{} has no clients in client asn {}".format(popp,asn))
+			return ret
+	def get_popps_by_client(self, client):
+		casn = self.utils.parse_asn(client)
+		if casn is None:
+			casn = ip32_to_24(client)
+
+		return self.clientasn_to_popp.get(casn, [])
+
 	def check_construct_client_to_peer_mapping(self, forceparse=False):
 		### Goal is to create client to popps mapping (so that we can create popp to clients mapping)
-		import pytricia
-		client_to_popps_fn = os.path.join(CACHE_DIR, 'client_to_popps.csv')
-		cust_cone_fn = os.path.join(CACHE_DIR, '{}_cust_cone.pkl'.format(self.system))
-		if not os.path.exists(client_to_popps_fn) or forceparse:
-			self.network_to_popp = pytricia.PyTricia()
-			providers = {}
-			cust_cone = {}
-			for fn in glob.glob(os.path.join(TMP_DIR, '*routes.txt')):
-				pop = re.search("\/(.+)\_routes",fn).group(1)
-				if self.limit_pops:
-					if pop not in self.include_pops:
-						continue
-				print("Parsing {} routes".format(pop))
-				with open(fn, 'r') as f:
-					for row in f:
-						row = row.strip()
-						if 'via' in row:
-							pref = row.split(' ')[0]
-						elif 'as_path' in row:
-							as_path = row.split(' ')[1:]	
-							first_hop = None
-							for as_hop in as_path:
-								if as_hop == "": continue
-								as_hop = int(as_hop)
-								if (as_hop >= 64512 and as_hop <= 65534) or as_hop == 20473:
-									continue
-								first_hop = as_hop
-								break
-							if not first_hop: continue
-							peer = str(first_hop)
-							try:
-								self.network_to_popp[pref].append((pop,peer))
-							except KeyError:
-								self.network_to_popp[pref] = [(pop,peer)]
-							try:
-								providers[peer]
-							except KeyError:
-								asn_pref = self.utils.parse_asn(pref)
-								if asn_pref is None: continue
-								try:
-									cust_cone[peer][asn_pref] = None
-								except KeyError:
-									cust_cone[peer] = {asn_pref:None}
-						elif '(20473,100)' in row:
-							## provider
-							provider = row.split(' ')[2]
-							provider = provider.split(',')[1].replace(')','').strip()
-							providers[provider] = None
-			popps = list(set(popp for pref in self.network_to_popp for popp in self.network_to_popp[pref]))
-			for asn in cust_cone:
-				cust_cone[asn] = list(cust_cone[asn])
-			### append the routeviews prefixes
-			## this is really expensive memory-wise
-			# for pop,peer in popps:
-			# 	all_asns = cust_cone.get(peer,[])
-			# 	for asn in all_asns:
-			# 		prefs = self.utils.routeviews_asn_to_pref.get(asn)
-			# 		if prefs is not None:
-			# 			for pref in prefs:
-			# 				try:
-			# 					self.network_to_popp[pref].append((pop,peer))
-			# 				except KeyError:
-			# 					self.network_to_popp[pref] = [(pop,peer)]
-			for pref in self.network_to_popp:
-				self.network_to_popp[pref] = list(set(self.network_to_popp[pref]))
-
-			providers = list(providers)
-			provider_popps = list(set([popp for popp in popps if popp[1] in providers]))
-			with open(os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system)),'w') as f:
-				for pop,peer in provider_popps:
-					f.write("{},{}\n".format(pop,peer))
-			for ntwrk in self.network_to_popp:
-				self.network_to_popp[ntwrk] = list(set(self.network_to_popp[ntwrk]))
+		try:
+			self.popp_to_clientasn
+			return
+		except AttributeError:
+			pass
+		peer_to_clients_fn = os.path.join(CACHE_DIR, 'peer_to_clients.csv')
+		if not os.path.exists(peer_to_clients_fn) or forceparse:
+			print("Creating popp to clients mapping")
+			network_to_peers_fn = os.path.join(DATA_DIR, '{}_network_to_peers.csv'.format(
+				self.system)) # from get_peers_from_routes
+			import pytricia
+			network_to_peers = pytricia.PyTricia()
+			for row in tqdm.tqdm(open(network_to_peers_fn,'r'),desc="Reading network to peers..."):
+				if row.startswith('pref'): continue
+				pref,peers = row.strip().split(',')
+				peers = peers.split('-')
+				network_to_peers[pref] = peers
+			print("Loading clients...")
 			clients = self.get_reachable_clients(limit=False)
-			print("Writing client to popps data")
-			with open(client_to_popps_fn ,'w') as f:
-				for client in clients:
-					ntwrk = self.network_to_popp.get_key(client)
-					if ntwrk is None:
-						continue
-					this_client_popps = set(self.network_to_popp.get(ntwrk))
-					while ntwrk is not None:
-						this_client_popps = this_client_popps.union(set(self.network_to_popp.get(ntwrk)))
-						ntwrk = self.network_to_popp.parent(ntwrk)
-					this_client_popps = get_difference(this_client_popps, provider_popps) # trivial
-					if len(this_client_popps) > 0:
-						popps_str = "-".join([popp[0]+"|"+popp[1]  for popp in this_client_popps])
-						f.write("{},{}\n".format(client,popps_str))
-			del clients
-			del self.network_to_popp
-			del self.addresses_that_respond_to_ping
-			pickle.dump(cust_cone, open(cust_cone_fn,'wb'))
-			print("Done writing client to popps data")
+			# self.utils.lookup_asns_if_needed(list(set([ip32_to_24(addr) for addr in clients])))
 
-		cust_cone = pickle.load(open(cust_cone_fn,'rb'))
-		self.popp_to_clients = {}
-		self.provider_popps = []
-		for row in open(os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system)),'r'):
-			self.provider_popps.append(tuple(row.strip().split(',')))
-		for row in tqdm.tqdm(open(client_to_popps_fn, 'r'),desc="Loading client to popps."):
-			client, popps_str = row.strip().split(',')
-			if popps_str.strip() == "": continue
-			popps = popps_str.split("-")
-			popps = list(set([tuple(popp.split("|")) for popp in popps]))
-			for popp in popps:
-				if self.limit_pops:
-					if popp[0] not in self.include_pops:
-						continue
+			asn_to_parents = {}
+			all_asns = set(list(self.utils.cc_cache)).union(set(self.utils.parse_asn(client) for client in clients))
+			all_asns = all_asns.union(set(list(self.utils.as_to_customers)))
+			for asn in tqdm.tqdm(all_asns, desc="Parsing CC data from CAIDA to tabulate parents and children..."):
+				for child_asn in self.utils.get_cc(asn):
+					try:
+						asn_to_parents[child_asn][asn] = None
+					except KeyError:
+						asn_to_parents[child_asn] = {asn: None}
+
+			for row in tqdm.tqdm(open(os.path.join(CACHE_DIR, '{}_customer_cone_from_routes.csv'.format(
+				self.system)),'r'),desc="Reading customer cone data from Vultr routes..."):
+				if row.startswith('parent'): continue
+				parent,children = row.strip().split(',')
+				parent = self.utils.parse_asn(parent)
+				for child in children.split('-'):
+					child = self.utils.parse_asn(child)
+					try:
+						asn_to_parents[child][parent] = None
+					except KeyError:
+						asn_to_parents[child] = {parent: None}
+				for asn in self.utils.get_cc(parent):
+					try:
+						asn_to_parents[asn][parent] = None
+					except KeyError:
+						asn_to_parents[asn] = {parent: None}
+
+			default_current_cone = {self.utils.parse_asn(asn):None for asn in self.provider_peers}
+			print(self.utils.parse_asn('6939') in default_current_cone)
+			pcone_cache = {}
+			def get_parent_cone(asn, current_cone=default_current_cone, 
+				recursion_allowed = 0, dbg = False):
+				current_cone[asn] = None
 				try:
-					self.popp_to_clients[popp].append(client)
+					if not dbg:
+						return pcone_cache[asn]
+					else:
+						print("in get parent cone for asn {}".format(asn))
 				except KeyError:
-					self.popp_to_clients[popp] = [client]
+					pass
+				last_length = len(current_cone)
+				this_length = -1
+				while last_length != this_length:
+					for parent in asn_to_parents.get(asn, []):
+						if parent == asn: continue
+						try:
+							default_current_cone[parent]
+							continue # trivial
+						except KeyError:
+							pass
+						if dbg:
+							print("{} a parent of {}, adding".format(parent,asn))
+						if recursion_allowed > 0:
+							try:
+								current_cone[parent]
+							except KeyError:
+								for gparent in get_parent_cone(parent, copy.deepcopy(current_cone),
+								 	recursion_allowed - 1, dbg=dbg):
+									if dbg:
+										print("{} a parent of {}, adding".format(gparent, parent))
+									current_cone[gparent] = None
+						else:
+							current_cone[parent] = None
 
-		for popp in self.popp_to_clients:
-			unreach_fn = os.path.join(CACHE_DIR, 'unreachable_dsts', "{}-{}.csv".format(
-				popp[0],popp[1]))
-			unreachable_clients = []
-			if os.path.exists(unreach_fn):
-				for row in open(unreach_fn, 'r'):
-					unreachable_clients.append(row.strip())
-			try:
-				self.popp_to_clients[popp] = get_difference(self.popp_to_clients[popp], 
-					unreachable_clients)
-			except KeyError:
-				pass
-		every_address = list(set([client for popp in self.popp_to_clients for client in self.popp_to_clients[popp]]))
-		self.utils.lookup_asns_if_needed(list(set([ip32_to_24(addr) for addr in every_address])))
-		print("Every address includes {} addresses".format(len(every_address)))
-		##### CAIDA AS data is way too noisy to motivate probing
-		##### one option in the future is to consider this an overestimate of CCs and the 
-		#### routes an underestimate. Then I can probe addresses based on the under,
-		#### and limit advertisements based on the over
+					recursion_allowed += 1
+					last_length = this_length
+					this_length = len(current_cone)
 
-		### Also look in the customer cone of all the peers, since we don't get all routes
-		### Then we can be confident CCs don't overlap to the extent that our CC data is complete
-		asn_to_ip = {}
-		# self.utils.lookup_asns_if_needed(list(set([ip32_to_24(ip) for ip in every_address])))
-		print("Forming ASN to IP mapping")
-		for addr in every_address:
-			asn = self.utils.parse_asn(addr)
-			if asn is None:continue
-			try:
-				asn_to_ip[asn].append(addr)
-			except KeyError:
-				asn_to_ip[asn] = [addr]
-		print("Tabulating {} popps to client mapping from CCs".format(len(self.popps)))
-		for popp in get_difference(self.popps, self.provider_popps):
-			if self.limit_pops:
-				if popp[0] not in self.include_pops:
+				pcone_cache[asn] = copy.deepcopy(current_cone)
+				return current_cone
+
+
+			peer_to_client_asns = {}
+			asn_to_clients = {}
+			vultr_peer_asns = list(set(self.utils.parse_asn(peer) for pop,peer in self.popps))
+			## they share ('tokyo', '42') -- ('newyork', '62668')
+			client_asns_debug = [self.utils.parse_asn('62490')]#[self.utils.parse_asn(asn) for asn in ['140659', '133249', '57713']]
+			for client in tqdm.tqdm(clients, desc="Forming peer to client mapping..."):
+				ntwrk = network_to_peers.get_key(client)
+				if ntwrk is None:
 					continue
-			# peer = self.utils.parse_asn(popp[1])
-			# try:
-			# 	self.popp_to_clients[popp]
-			# except KeyError:
-			# 	self.popp_to_clients[popp] = []
-			# for asn in self.utils.get_cc(peer):
-			# 	self.popp_to_clients[popp] += asn_to_ip.get(asn,[])
-			pop,peer = popp
-			try:
-				self.popp_to_clients[popp]
-			except KeyError:
-				self.popp_to_clients[popp] = []
-			for asn in cust_cone.get(peer,[]):
-				self.popp_to_clients[popp] += asn_to_ip.get(asn,[])
-		del asn_to_ip
-		to_del = [popp for popp in self.popp_to_clients if len(self.popp_to_clients[popp]) == 0]
-		for popp in to_del:
-			del self.popp_to_clients[popp]
-		## Form inverse mapping
-		print("Tabulating client to popp mapping from BGP data")
-		self.client_to_popps = {client: [] for client in every_address}
-		for popp in get_difference(self.popp_to_clients,self.provider_popps):
-			if self.limit_pops:
-				if popp[0] not in self.include_pops:
+				this_client_asn = self.utils.parse_asn(ntwrk)
+				
+				try:
+					asn_to_clients[this_client_asn].append(client)
 					continue
-			for client in self.popp_to_clients[popp]:
-				self.client_to_popps[client].append(popp)
-		for client in every_address:
-			self.client_to_popps[client] += self.provider_popps
-			self.client_to_popps[client] = list(set(self.client_to_popps[client]))
+				except KeyError:
+					asn_to_clients[this_client_asn] = [client]
+				
+				this_client_peers = get_intersection(vultr_peer_asns, 
+					get_parent_cone(this_client_asn, dbg=this_client_asn in client_asns_debug))
+				
+				this_client_peers = get_difference(this_client_peers, default_current_cone) # trivial
+				if this_client_asn in client_asns_debug:
+					print("{} -- {}".format(this_client_asn,this_client_peers))
+				for peer in this_client_peers:
+					try:
+						peer_to_client_asns[peer][this_client_asn] = None
+					except KeyError:
+						peer_to_client_asns[peer] = {this_client_asn: None}
 
-		### TODO -- maybe reconsider something here, since this is a lot of extra memory
-		# for trivial information
-		for popp in self.provider_popps:
-			if self.limit_pops:
-				if popp[0] not in self.include_pops:
-					continue
-			self.popp_to_clients[popp] = every_address
+			with open(peer_to_clients_fn, 'w') as f:
+				for peer,clients in peer_to_client_asns.items():
+					for client in clients:
+						f.write("{},{}\n".format(peer,client))
 
-		#### Create popp to asn mapping to make conflict finding easier
-		print("Tabulating popp to clientasn mapping")
+			with open(asn_to_clients_fn, 'w') as f:
+				for asn,clients in asn_to_clients.items():
+					for client in clients:
+						f.write('{},{}\n'.format(asn,client))
+				
+			del clients
+			del self.addresses_that_respond_to_ping
+
 		self.popp_to_clientasn = {}
-		for popp,clients in self.popp_to_clients.items():
+		for row in tqdm.tqdm(open(peer_to_clients_fn,'r'),
+			desc="Loading peer to client mapping..."):
+			peer,client = row.strip().split(',')
+			peer = self.utils.parse_asn(peer)
+			client = self.utils.parse_asn(client)
+			for _peer in self.utils.org_to_as.get(peer, [peer]):
+				for pop in self.peer_to_pops.get(_peer,[]):
+					try:
+						self.popp_to_clientasn[pop,_peer].append(client)
+					except KeyError:
+						self.popp_to_clientasn[pop,_peer] = [client]
+		self.asn_to_clients = {}
+		for row in tqdm.tqdm(open(asn_to_clients_fn,'r'),desc="Loading asn to clients fn..."):
+			asn,client = row.strip().split(',')
+			asn = self.utils.parse_asn(asn)
+			try:
+				self.asn_to_clients[asn].append(client)
+			except KeyError:
+				self.asn_to_clients[asn] = [client]
+		### Limit probeable clients to a maximum number per client ASN
+		limit_to_max = 1000
+		np.random.seed(31415)
+		for asn in sorted(self.asn_to_clients, key = lambda el : int(el)):
+			clients = self.asn_to_clients[asn]
+			np.random.shuffle(clients)
+			self.asn_to_clients[asn] = clients[0:limit_to_max]
+
+		print("{} popps with clients".format(len(self.popp_to_clientasn)))
+		#### Create popp to asn mapping to make conflict finding easier
+		self.clientasn_to_popp = {}
+		for popp,clients in tqdm.tqdm(self.popp_to_clientasn.items(),
+			desc="tabulating clientasn to popp mapping..."):
 			if popp in self.provider_popps: continue
-			## Exclude clients which we know don't have a path
-			pop,peer = popp
-			unreachable_fn = os.path.join(CACHE_DIR, 'unreachable_dsts', 
-				'{}-{}.csv'.format(pop,peer))
-			if os.path.exists(unreachable_fn):
-				bad_clients = []
-				for row in open(unreachable_fn, 'r'):
-					bad_clients.append(row.strip())
-				self.popp_to_clients[popp] = get_difference(self.popp_to_clients[popp], bad_clients)
+			# ## Exclude clients which we know don't have a path
+			# pop,peer = popp
+			# unreachable_fn = os.path.join(CACHE_DIR, 'unreachable_dsts', 
+			# 	'{}-{}.csv'.format(pop,peer))
+			# if os.path.exists(unreachable_fn):
+			# 	bad_clients = []
+			# 	for row in open(unreachable_fn, 'r'):
+			# 		bad_clients.append(row.strip())
+			# 	self.popp_to_clientasn[popp] = get_difference(self.popp_to_clientasn[popp], bad_clients)
 
-			self.popp_to_clientasn[popp] = {}
 			for client in clients:
-				casn = self.utils.parse_asn(client)
-				if casn is None:
-					casn = ip32_to_24(client)
-				self.popp_to_clientasn[popp][casn] = None
-			self.popp_to_clientasn[popp] = list(self.popp_to_clientasn[popp])
+				try:
+					self.clientasn_to_popp[client].append(popp)
+				except KeyError:
+					self.clientasn_to_popp[client] = [popp]
+		for casn,popps in self.clientasn_to_popp.items():
+			self.clientasn_to_popp[casn] = list(set(popps))
 
-
-		# tmpip = '104.18.202.233'
-		# advs = [('miami', '32787'), ('miami', '32771'), ('miami', '19531'), ('miami', '8038')]
-		# print(self.client_to_popps[tmpip])
-		# print(get_intersection(self.client_to_popps[tmpip], advs))
-		# for popp,clients in self.popp_to_clients.items():
-		# 	if tmpip in clients:
-		# 		if popp in self.client_to_popps[tmpip]:
-		# 			print("{} correctly has {}".format(popp,tmpip))
-		# 		else:
-		# 			print("{} incorrectly has {}".format(popp,tmpip))
-		# for popp in advs:
-		# 	clients = self.popp_to_clients[popp]
-		# 	if tmpip in clients:
-		# 		print("Adv {} has {}".format(popp,tmpip))
-		# 	else:
-		# 		print("Adv {} doesn't have {}".format(popp,tmpip))
-		# exit(0)
-
-		print("{} popps with clients".format(len(self.popp_to_clients)))
-
-		n_clients_per_popp = list([len(self.popp_to_clients[popp]) for popp in self.popp_to_clients])
+		n_clients_per_popp = list([len(self.popp_to_clientasn[popp]) for popp in self.popp_to_clientasn])
 		x,cdf_x = get_cdf_xy(n_clients_per_popp,logx=True)
 		import matplotlib.pyplot as plt
 		plt.semilogx(x,cdf_x)
-		plt.xlabel("Number of Clients")
+		plt.xlabel("Number of Client ASNs")
 		plt.ylabel("CDF of PoPPs")
 		plt.grid(True)
-		plt.savefig("figures/n_clients_per_popp.pdf")
+		plt.savefig("figures/n_networks_per_popp.pdf")
 		plt.clf(); plt.close()
 
 	def load_anycast_latencies(self):
@@ -837,9 +866,6 @@ class Deployment_Measure_Wrapper():
 		res = parse_ingress_latencies_mp(fn)
 		return res['meas_by_popp'], res['meas_by_ip']
 
-	
-
-
 	def convert_org_to_peer(self, org, pop):
 		if type(org) == str:
 			org = org.strip()
@@ -851,10 +877,6 @@ class Deployment_Measure_Wrapper():
 		# print("Problem, {} maps to {}, at pop {} : {}".format(org,peers,pop,at_pop))
 		return [p for p,v in at_pop.items() if v][0]
 
-
-	
-
-	
 
 	def find_needed_pingable_targets(self):
 		import pytricia
@@ -974,22 +996,45 @@ class Deployment_Measure_Wrapper():
 			return
 		except AttributeError:
 			pass
-		print("Loading addresses that respond to ping.")
 		### addresses for which we have and have not previously gotten a response to a ping
 		self.addresses_that_respond_to_ping = {0:[],1:[]}
 		if os.path.exists(self.addresses_that_respond_to_ping_fn):
 			with open(self.addresses_that_respond_to_ping_fn, 'r') as f:
-				for row in f:
+				for row in tqdm.tqdm(f,desc="Loading addresses that respond to ping."):
 					# 1 -- responds, 0 -- doesn't
 					ipadr,reach = row.strip().split(',')
 					self.addresses_that_respond_to_ping[int(reach)].append(ipadr)
 		# If an address has failed to respond once in history, exclude it
 		self.addresses_that_respond_to_ping[1] = get_difference(self.addresses_that_respond_to_ping[1], 
 				self.addresses_that_respond_to_ping[0])
-		self.all_client_addresses_from_msft = list(set(self.all_client_addresses_from_msft + self.addresses_that_respond_to_ping[1]))
 
-	def get_reachable_clients(self, limit=False):
+	def check_load_yunfan_prefixes(self):
+		try:
+			self.yunfan_user_pref_tri
+		except AttributeError:
+			import pytricia
+			self.yunfan_user_pref_tri = pytricia.PyTricia()
+			for row in open(os.path.join(CACHE_DIR, 'yunfan_prefixes_with_users.csv')):
+				if row.strip() == 'prefix': continue
+				self.yunfan_user_pref_tri[row.strip()] = None
+
+	def get_reachable_clients(self, limit=False, force=False):
+		try:
+			if not force:
+				return self.reachable_clients
+		except AttributeError:
+			pass
+		
+		### We've pinged addresses to see if they respond and cached the answers, load this data
 		self.check_load_addresses_that_respond_to_ping()
+		
+		if not self.recalc_probable_clients:
+			### We've probed everything and we know what's reachable and what isn't
+			### Faster to just skip the rest of this function
+			self.reachable_clients = self.addresses_that_respond_to_ping[1]
+			return self.reachable_clients
+
+		self.check_load_probable_address_source_data()
 		dsts = list(self.all_client_addresses_from_msft)
 
 		## see which ones respond to ping
@@ -1017,7 +1062,247 @@ class Deployment_Measure_Wrapper():
 			responsive_dsts = self.limit_to_interesting_clients(responsive_dsts)
 			print("Limited to {} interesting responsive destinations.".format(len(responsive_dsts)))
 
+		## Limit to yunfan user prefixes
+		if self.limit_to_yunfan:
+			self.check_load_yunfan_prefixes()
+			limited_responsive_dsts = {}
+			n_choose_each_pref = 3
+			for dst in responsive_dsts:
+				pref = self.yunfan_user_pref_tri.get_key(dst + '/32')
+				if pref is not None:
+					try:
+						limited_responsive_dsts[pref].append(dst)
+					except KeyError:
+						limited_responsive_dsts[pref] = [dst]
+			for pref in list(limited_responsive_dsts):
+				if len(limited_responsive_dsts[pref]) > n_choose_each_pref:
+					dsts = np.random.choice(limited_responsive_dsts[pref], size=3)
+				else:
+					dsts = limited_responsive_dsts[pref]
+				limited_responsive_dsts[pref] = dsts
+			responsive_dsts = list(set([dst for pref,dsts in limited_responsive_dsts.items() for dst in dsts]))
+			print("After limiting to Yunfan's prefixes, looking at {} responsive dsts".format(
+				len(responsive_dsts)))
+		self.check_load_pop_to_clients()
 		for pop in self.pop_to_clients:
 			self.pop_to_clients[pop] = get_intersection(self.pop_to_clients[pop], responsive_dsts)
 
+		self.reachable_clients = responsive_dsts
+
 		return responsive_dsts
+
+	def conduct_measurements_to_prefix_popps(self, prefix_popps, every_client_of_interest, popp_lat_fn, **kwargs):
+		n_prefs = len(self.available_prefixes)
+		n_adv_rounds = int(np.ceil(len(prefix_popps) / n_prefs))
+		pw = Pinger_Wrapper(self.pops, self.pop_to_intf)
+
+		# measuring_to_client_ns = []
+		# for adv_set in prefix_popps:
+		# 	for popp in adv_set:
+		# 		these_clients = get_intersection(every_client_of_interest, self.popp_to_clients[popp])
+		# 		measuring_to_client_ns.append(len(these_clients))
+		# import matplotlib.pyplot as plt
+		# x,cdf_x = get_cdf_xy(measuring_to_client_ns,logx=True)
+		# plt.semilogx(x,cdf_x)
+		# plt.xlabel("Number of Clients We're Measuring To")
+		# plt.ylabel("CDF of PoPPs We Need to Measure To")
+		# plt.savefig("figures/n_clients_measuring_to_per_popp.pdf")
+
+		only_providers = kwargs.get('only_providers', False)
+
+		for adv_round_i in range(n_adv_rounds):
+			self.measure_vpn_lats()
+			adv_sets = prefix_popps[n_prefs * adv_round_i: n_prefs * (adv_round_i+1)]
+			for asi,adv_set in enumerate(adv_sets):
+				print("Adv set {}:\n {}".format(asi,adv_set))
+			srcs = []
+			pref_set = []
+			popps_set = []
+			pops_set = {}
+			adv_set_to_taps = {}
+			for i, popps in enumerate(adv_sets):
+				pref = self.get_most_viable_prefix()
+				pref_set.append(pref)
+				measurement_src_ip = pref_to_ip(pref)
+				srcs.append(measurement_src_ip)
+				popps_set.append(popps) # each prefix will be used to measure these corresponding popps
+				self.advertise_to_popps(popps, pref)
+
+				pops = list(set([popp[0] for popp in popps])) # pops corresponding to this prefix
+				pops_set[i] = pops
+				adv_set_to_taps[i] = [self.pop_to_intf[pop] for pop in pops]
+			max_n_pops = max(len(v) for v in adv_set_to_taps.values())	
+			for pop_iter in range(max_n_pops):
+				srcs_set = []
+				taps_set = []
+				this_pops_set = []
+				clients_set = []
+				adv_set_is = []
+				for adv_set_i in range(len(adv_sets)):
+					try:
+						# different prefixes have different numbers of PoPs involved
+						# measurements are done per PoP, so this is a bit awkward
+						taps_set.append(adv_set_to_taps[adv_set_i][pop_iter])
+						srcs_set.append(srcs[adv_set_i])
+						this_pop = pops_set[adv_set_i][pop_iter] # one pop at a time
+						this_pops_set.append(this_pop)
+						if not only_providers:
+							these_clients = set()
+							for popp in popps_set[adv_set_i]:
+								## Get any client who we know can route through these ingresses
+								if popp[0] != this_pop: continue ## popps corresponding to focused pop
+								this_popp_clients = list(self.get_clients_by_popp([popp],verb=True).values())[0]
+								these_clients = these_clients.union(set(this_popp_clients))
+								these_clients = set(get_intersection(these_clients, every_client_of_interest))
+						else:
+							these_clients = every_client_of_interest
+						clients_set.append(list(these_clients))
+						adv_set_is.append(adv_set_i)
+					except IndexError:
+						pass
+				print("PoP iter {}".format(pop_iter))
+				print(srcs_set)
+				print(taps_set)
+				print(this_pops_set)
+				print(popps_set)
+				print("Client set lens: {}".format([len(dsts) for dsts in clients_set]))
+
+				if CAREFUL:
+					exit(0)
+				lats_results = pw.run(srcs_set, taps_set, clients_set,
+					remove_bad_meas=True)
+
+				t_meas = int(time.time())
+				for src,pop,dsts,asi in zip(srcs_set, this_pops_set, clients_set, adv_set_is):
+					with open(popp_lat_fn,'a') as f:
+						for client_dst in dsts:
+							if len(popps_set[asi]) == 1:
+								if popps_set[asi][0] in self.provider_popps:
+									client_has_path = [popps_set[asi][0]]
+								else:
+									client_has_path = get_intersection(self.get_popps_by_client(client_dst), popps_set[asi])
+							else:
+								client_has_path = get_intersection(self.get_popps_by_client(client_dst), popps_set[asi])
+
+							if len(client_has_path) != 1:
+								print("WEIRDNESS -- client {} should have one path to {} but has many/none {}".format(
+									client_dst,popps_set[asi],self.get_popps_by_client(client_dst)))
+								print("{} {} {}".format(src,pop,client_has_path))
+								continue
+							clientpathpop, clientpathpeer = client_has_path[0]
+							if clientpathpop != pop:
+								print("Client path pop != pop for {}, {} vs {}".format(client_dst,clientpathpop,pop))
+								continue
+							rtts = []
+							for meas in lats_results[src].get(client_dst, []):
+								### For this advertisement, there's only one ingress this client has a valid path to
+								if meas.get('startpop','start') != meas.get('endpop','end'): continue
+								if meas['pop'] != pop or meas['rtt'] is None:
+									continue
+								rtts.append(meas['rtt'])
+							if len(rtts) > 0:
+								rtt = np.min(rtts)
+								f.write("{},{},{},{},{},{}\n".format(t_meas,client_dst,
+									clientpathpop,clientpathpeer,round(rtt,4),round(rtt - self.pop_vpn_lats[pop],4)))
+							else:
+								### Need to save the information that this client could not reach its
+								### intended destination, even though we thought it might have
+								with open(os.path.join(CACHE_DIR, "unreachable_dsts", "{}-{}.csv".format(
+									clientpathpop,clientpathpeer)),'a') as f2:
+									f2.write("{}\n".format(client_dst))
+				del lats_results
+			for pref, popps in zip(pref_set, popps_set):
+				for pop in set([popp[0] for popp in popps]):
+					self.withdraw_from_pop(pop, pref)
+			with open(self.already_completed_popps_fn, 'a') as f:
+				for popps in popps_set:
+					for pop,peer in popps:
+						f.write("{},{}\n".format(pop,peer))
+
+	def check_load_pop_to_clients(self):
+		try:
+			self.pop_to_clients
+			return
+		except AttributeError:
+			pass
+		## Natural client to PoP mapping for an anycast advertisement, learned from measurements
+		self.pop_to_clients = {pop:[] for pop in self.pops}
+		self.pop_to_clients_fn = os.path.join(DATA_DIR, 'client_to_pop.csv')
+		self.client_to_pop = {}
+		print("Loading PoP to clients...")
+		if os.path.exists(self.pop_to_clients_fn):
+			for row in open(self.pop_to_clients_fn, 'r'):
+				client,pop = row.strip().split(',')
+				if self.limit_pops:
+					if pop not in self.include_pops:
+						continue
+				self.pop_to_clients[pop].append(client)
+				self.client_to_pop[client] = pop
+
+	def check_load_probable_address_source_data(self):
+		"""Loads addresses from Microsoft and the ISI hitlist, to help find probable addresses in v4 space."""
+		try:
+			self.all_client_addresses_from_msft
+			return
+		except AttributeError:
+			pass
+		self.all_client_addresses_from_msft = set()
+		## perhaps reachable addresses for clients
+		self.dst_to_ug = {}
+		self.ug_to_vol = {}
+		for row in tqdm.tqdm(csv.DictReader(open(os.path.join(DATA_DIR,
+			'client24_metro_vol_20220620.csv'),'r')), desc="Loading Microsoft user data"):
+			break
+			ug = (row['metro'], row['asn'])
+			try:
+				self.ug_to_vol[ug] += float(row['N'])
+			except KeyError:
+				self.ug_to_vol[ug] = float(row['N'])
+			self.dst_to_ug[row['client_24']] = ug
+
+		# reachable_addr_metro_asn.kql, 5 days
+		self.all_client_addresses_from_msft = {}
+		ug_to_loc = {}
+		for row in tqdm.tqdm(csv.DictReader(open(os.path.join(DATA_DIR, 
+			'reachable_addr_metro_asn_5d.csv'),'r')),desc="Loading reachable addresses."):
+			ug = (row['metro'],row['asn'])
+			if ":" not in row['reachable_addr'] and row['reachable_addr'] != '':
+				self.all_client_addresses_from_msft[row['reachable_addr']] = None
+				self.dst_to_ug[ip32_to_24(row['reachable_addr'])] = ug
+			if ":" not in row['reachable_addr']:
+				ug_to_loc[ug] = (float(row['lat']), float(row['lon']))
+				try:
+					self.ug_to_vol[ug] += float(row['N'])
+				except KeyError:
+					self.ug_to_vol[ug] = float(row['N'])
+				
+		self.all_client_addresses_from_msft = set(self.all_client_addresses_from_msft)
+		self.check_load_addresses_that_respond_to_ping()
+		self.all_client_addresses_from_msft = list(set(self.all_client_addresses_from_msft + self.addresses_that_respond_to_ping[1]))
+	
+
+		### basically the ISI hitlist
+		for fn in tqdm.tqdm(glob.glob(os.path.join(DATA_DIR, "hitlist_from_jiangchen", "*")),
+			desc="Loading hitlists from JC"):
+			if self.limit_pops:
+				pop = re.search("anycast\_ip\_(.+)\.txt",fn).group(1)
+				if pop not in self.include_pops:
+					continue
+			these_ips = set([row.strip() for row in open(fn,'r').readlines()])
+			self.all_client_addresses_from_msft = set(self.all_client_addresses_from_msft).union(these_ips)
+		self.all_client_addresses_from_msft = get_difference(self.all_client_addresses_from_msft, self.multipop_clients)
+		self.check_load_addresses_that_respond_to_ping()
+		ugs_in_ping = {}
+		for ip in self.addresses_that_respond_to_ping[1]:
+			ntwrk = ip32_to_24(ip)
+			try:
+				ugs_in_ping[self.dst_to_ug[ntwrk]] = None
+			except KeyError:
+				pass
+		print("{} UGs thus far respond to ping, {} pct of volume".format(len(ugs_in_ping),
+			sum(self.ug_to_vol[ug] for ug in ugs_in_ping) * 100.0 / sum(list(self.ug_to_vol.values()))))
+		with open(os.path.join(CACHE_DIR, '{}_used_ug_locs.csv'.format(self.system)), 'w') as f:
+			for ug in ug_to_loc:
+				lat,lon = ug_to_loc[ug]
+				f.write("{},{},{}\n".format(lat,lon,self.ug_to_vol[ug]))
+		self.all_client_addresses_from_msft = list(self.all_client_addresses_from_msft)
