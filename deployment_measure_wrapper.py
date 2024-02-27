@@ -10,14 +10,10 @@ asn_to_clients_fn = os.path.join(CACHE_DIR, 'asn_to_probable_clients.csv')
 
 class Deployment_Measure_Wrapper():
 	def __init__(self, **kwargs):
-
-		self.utils = AS_Utils_Wrapper()
-		self.utils.check_load_siblings()
-		self.utils.check_load_as_rel()
-		self.utils.update_cc_cache()
-
 		#### Speeds up loading everything considerably if you set this to false
 		self.recalc_probable_clients = False
+
+		self.system = 'vultr'
 
 		self.addresses_that_respond_to_ping_fn = os.path.join(DATA_DIR, "addresses_that_respond_to_ping.csv")
 		all_muxes_str = check_output("sudo client/peering openvpn status", shell=True).decode().split('\n')
@@ -27,11 +23,12 @@ class Deployment_Measure_Wrapper():
 			self.pops = []
 			for row in all_muxes_str:
 				if row.strip() == '': continue
-				self.pops.append(row.split(' ')[0])
+				if 'vtr' not in row: continue
+				self.pops.append(row.split(' ')[0][3:])
 		self.pops = sorted(self.pops)
 		self.pop_to_intf = {}
 		for pop in self.pops:
-			this_mux_str = [mux_str for mux_str in all_muxes_str if pop in mux_str]
+			this_mux_str = [mux_str for mux_str in all_muxes_str if "vtr"+pop in mux_str]
 			assert len(this_mux_str) == 1
 			this_mux_str = this_mux_str[0]
 			self.pop_to_intf[pop] = "tap" + re.search("tap(\d+)", this_mux_str).group(1)
@@ -47,7 +44,6 @@ class Deployment_Measure_Wrapper():
 		self.active_experiments = {}
 		self.limit_to_yunfan = kwargs.get('limit_to_yunfan', False)
 
-		popps = csv.DictReader(open(os.path.join(DATA_DIR, "{}_peers_inferred.csv".format(self.system)), 'r'))
 		self.peers = {}
 		self.peer_to_id = {}
 
@@ -75,6 +71,7 @@ class Deployment_Measure_Wrapper():
 		self.pop_to_ixps = {}
 		self.popps_to_ixps = {}
 		provider_popp_fn = os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system))
+		popps = csv.DictReader(open(os.path.join(DATA_DIR, "{}_peers_inferred.csv".format(self.system)), 'r'))
 		for row in popps:
 			if self.system == "peering":
 				pop, peer, session_id = row["BGP Mux"], row["Peer ASN"], row["Session ID"]
@@ -99,7 +96,7 @@ class Deployment_Measure_Wrapper():
 					self.popps[pop,peer].append(tp)
 				except KeyError:
 					self.popps[pop,peer] = [tp]
-				if ixp != '':
+				if ixp != '' and ixp != 'None':
 					try:
 						self.popps_to_ixps[pop,peer][ixp] = None
 					except KeyError:
@@ -108,8 +105,8 @@ class Deployment_Measure_Wrapper():
 						self.pop_to_ixps[pop][ixp] = None
 					except KeyError:
 						self.pop_to_ixps[pop] = {ixp:None}
-		print(self.pop_to_ixps)
-		print(list(set([ixp for pop in self.pop_to_ixps for ixp in self.pop_to_ixps[pop]])))
+		# print(self.pop_to_ixps)
+		# print(list(set([ixp for pop in self.pop_to_ixps for ixp in self.pop_to_ixps[pop]])))
 
 		if self.system == 'vultr':
 			# for popp,tps in self.popps.items():
@@ -131,7 +128,8 @@ class Deployment_Measure_Wrapper():
 				for popp,rels in self.popps.items():
 					if 'provider' in rels:
 						f.write("{},{}\n".format(popp[0],popp[1]))
-			community_ixps = ['45686','26162','24115']
+			# community_ixps = ['45686','26162','24115']
+			community_ixps = ['63221', '24115', '62499', '6695', '43252', '47228', '56890', '56890', '19996','63221']
 			self.no_community_ixps = list(set([ixp for pop in self.pop_to_ixps for ixp in self.pop_to_ixps[pop]]))
 			self.no_community_ixps = get_difference(self.no_community_ixps, community_ixps)
 
@@ -153,6 +151,7 @@ class Deployment_Measure_Wrapper():
 
 		self.pop_to_loc = POP_TO_LOC[self.system]
 		self.pop_vpn_lats = {}
+		self.pop_to_clients_fn = os.path.join(DATA_DIR, 'client_to_pop.csv')
 		self.pop_vpn_lats_fn = os.path.join(CACHE_DIR, 'pop_vpn_lats_{}.pkl'.format(self.system))
 		if os.path.exists(self.pop_vpn_lats_fn):
 			self.pop_vpn_lats = pickle.load(open(self.pop_vpn_lats_fn,'rb'))
@@ -187,9 +186,8 @@ class Deployment_Measure_Wrapper():
 		}}[self.system]
 		self.pops_list = list(self.vpn_ips)
 
-		self.limit_pops = False
-		self.include_pops = ['miami', 'atlanta','newyork','dallas','losangelas']
-		if self.limit_pops:
+		self.include_pops = kwargs.get('include_pops', self.pops)
+		if len(self.include_pops) < len(self.pops):
 			self.pops_list = get_intersection(self.pops_list, self.include_pops)
 			self.peers = {pop:self.peers[pop] for pop in self.include_pops}
 			self.popps = [(pop,peer) for pop,peer in self.popps if pop in self.include_pops]
@@ -197,6 +195,13 @@ class Deployment_Measure_Wrapper():
 			self.pops = self.include_pops
 		print("Working with PoPs : {}".format(self.pops))
 		if kwargs.get('quickinit', False): return
+
+		## Load utils like AS to org mapping		
+		self.utils = AS_Utils_Wrapper()
+		self.utils.check_load_siblings()
+		self.utils.check_load_as_rel()
+		self.utils.update_cc_cache()
+
 
 		
 		## clients that switch between pops, annoying
@@ -305,28 +310,9 @@ class Deployment_Measure_Wrapper():
 			return check_output(cmd,shell=True)
 			self.track_rfd(cmd, **kwargs)
 
-	def ixp_to_limit_str(self, ixp, peers):
-		community_str = ""
-		if ixp == '45686':
-			## JPNAP, Euro-IX standard https://www.euro-ix.net/en/forixps/large-bgp-communities/
-			community_str = "-c 45686,0,0 " # no export
-			for peer in peers:
-				community_str += "-l 45686,1,{} ".format(peer) # override no export to this peer
-		elif ixp == '26162':
-			## NIC.BR http://docs.ix.br/doc/politica-de-tratamento-de-communities-no-ix-br-v4_3.pdf
-			for peer in peers:
-				community_str += "-l 65001,0,{} ".format(peer)
-		elif ixp == '24115':
-			## Equinix, docs here https://deploy.equinix.com/developers/docs/metal/bgp/global-communities/
-			## but I got this community from VULTR support
-			for peer in peers:
-				community_str += "-l 24115,1,{} ".format(peer)
-		else:
-			print("WARNING : IXP {} not implemented in ixp_to_limit_str".format(ixp))
-		return community_str
-
-	def get_communtiy_str_vultr_adv_to_peers(self, pop, peers):
+	def get_communtiy_str_vultr_adv_to_peers_old(self, pop, peers):
 		#### Basic version, ignore all routeservers
+		### (so many popps with only routeserver connections will be unreachable)
 
 		community_str = ""
 		peers_filtered = list([peer for peer in peers if int(peer) <= 65000])
@@ -347,7 +333,8 @@ class Deployment_Measure_Wrapper():
 
 		return community_str
 
-	def get_communtiy_str_vultr_adv_to_peers_new(self, pop, peers):
+	def get_communtiy_str_vultr_adv_to_peers(self, pop, peers):
+		### Want to advertise to these peers and only these peers at this pop
 		### ideally would include all ixp-specific rules
 		community_str = ""
 		peers_filtered = list([peer for peer in peers if int(peer) <= 65000])
@@ -355,33 +342,64 @@ class Deployment_Measure_Wrapper():
 			print("Note -- ignoring some peers as larger ASNs not yet supported.")
 		if len(peers_filtered) == 0:
 			raise ValueError("must be nonzero number of peers")
-		non_ixp_peers_include = [peer for peer in peers_filtered if self.popps[pop,peer] != 'routeserver']
-		non_ixp_peers_excldue = get_difference([peer for _pop,peer in self.popps if _pop == pop], non_ixp_peers_include)
-		for non_ixp_peer_exclude in non_ixp_peers_excldue:
-			community_str += '-c 64600,{} '.format(non_ixp_peer_exclude)
-		
-		ixp_peers = get_difference(peers_filtered, non_ixp_peers)
-		ixps_at_pop_not_used = [] ## TODO : want to fully block to any ixp we aren't using
 
-		if len(ixp_peers) > 0:
+		print(peers_filtered)
+
+		this_pop_providers = list([peer for _pop,peer in self.popps if 'provider' in self.popps[_pop,peer] and pop == _pop])
+
+		## for peers with more than one connection type at a PoP (which is many of them)
+		## we prefer provider connections first, then public peer, then private peer, then routeserver
+		exclude_onward = set() 
+
+		providers_include = get_intersection(peers_filtered, this_pop_providers)
+		providers_exclude = get_difference(this_pop_providers, peers_filtered)
+		for provider_exclude in providers_exclude:
+			community_str += "-c 64600,{} ".format(provider_exclude)
+
+		exclude_onward = exclude_onward.union(set(providers_include))
+
+		community_str += "-c 20473,6601 " # no export to direct peers via the IXP
+		direct_ixp_peers_include = [peer for peer in peers_filtered if 'ixp_direct' in self.popps[pop,peer]]
+		direct_ixp_peers_inlcude = get_difference(direct_ixp_peers_include, exclude_onward)
+		for direct_ixp_peer in direct_ixp_peers_include:
+			community_str += "-c 64699,{} ".format(direct_ixp_peer)
+
+		exclude_onward = exclude_onward.union(set(direct_ixp_peers_include))
+
+		this_pop_private_peers = list([peer for _pop,peer in self.popps if 'privatepeer' in self.popps[_pop,peer] and pop == _pop])
+		this_pop_private_peers = get_difference(this_pop_private_peers, exclude_onward)
+		private_peers_include = get_intersection(peers_filtered, this_pop_private_peers)
+		private_peers_exclude = get_difference(this_pop_private_peers, peers_filtered)
+
+		for private_peer_exclude in private_peers_exclude:
+			community_str += "-c 64600,{} ".format(private_peer_exclude)
+
+		exclude_onward = exclude_onward.union(set(private_peers_include))
+
+		this_pop_routeserver_peers = list([peer for _pop,peer in self.popps if 'routeserver' in self.popps[_pop,peer] and pop == _pop])
+		routeserver_peers = get_intersection(peers_filtered, this_pop_routeserver_peers)
+		routeserver_peers = get_difference(routeserver_peers, exclude_onward)
+
+		if len(routeserver_peers) > 0:
+			community_str += "-c 20473,6602 " ## Export to route servers
+			## all IXPs at the PoP
 			all_ixps = self.pop_to_ixps[pop]
-			ixps_used = list(set(ixp for peer in ixp_peers for ixp in self.popps_to_ixps[pop,peer]))
+			## all IXPs with peers we want to advertise to
+			ixps_used = list(set(ixp for peer in routeserver_peers for ixp in self.popps_to_ixps[pop,peer]))
+			## IXPs at the PoP that we definitely don't want to advertise to
 			unused_ixps = get_difference(all_ixps, ixps_used)
 			for ixp in unused_ixps:
-				# dont advertise
+				## dont advertise to these IXPs
 				community_str += '-c 64600,{} '.format(ixp)
 			for ixp in ixps_used:
-				# override dont export
 				if ixp in self.no_community_ixps:
-					## We can't limit advertisements, so block all advertisements to this IXP
-					## maybe don't need this
+					## We can't limit advertisements because we don't know how to, so block all advertisements to this IXP
 					community_str += '-c 64600,{} '.format(ixp)
 					continue
-				## override don't export with export specifically to ixp
-				community_str += '-c 64699,{} '.format(ixp)
 			peers_by_ixp = {}
-			for peer in ixp_peers:
-				for ixp in self.popps_to_ixps[pop,peer]:
+			for peer in routeserver_peers:
+				for ixp in sorted(self.popps_to_ixps[pop,peer]): # since we sort, we'll use the same IXP for all of them if we can
+					if ixp in unused_ixps or ixp in self.no_community_ixps: continue
 					try:
 						peers_by_ixp[ixp].append(peer)
 					except KeyError:
@@ -389,16 +407,50 @@ class Deployment_Measure_Wrapper():
 					#### Just use one IXP, since routing is very likely the same to all
 					break
 			for ixp,this_ixp_peers in peers_by_ixp.items():
-				if ixp in self.no_community_ixps: continue
-				community_str += self.ixp_to_limit_str(ixp,this_ixp_peers)
+				## Advertise to this 
+				community_str += self.ixp_to_limit_str(ixp, this_ixp_peers)
 		return community_str	
 
+	def ixp_to_limit_str_old(self, ixp, peers):
+		community_str = ""
+		if ixp == '45686':
+			## JPNAP, Euro-IX standard https://www.euro-ix.net/en/forixps/large-bgp-communities/
+			community_str = "-c 45686,0,0 " # no export
+			for peer in peers:
+				community_str += "-l 45686,1,{} ".format(peer) # override no export to this peer
+		elif ixp == '26162':
+			## NIC.BR http://docs.ix.br/doc/politica-de-tratamento-de-communities-no-ix-br-v4_3.pdf
+			for peer in peers:
+				community_str += "-l 65001,0,{} ".format(peer)
+		elif ixp == '24115':
+			## Equinix, docs here https://deploy.equinix.com/developers/docs/metal/bgp/global-communities/
+			## but I got this community from VULTR support
+			for peer in peers:
+				community_str += "-l 24115,1,{} ".format(peer)
+		else:
+			print("WARNING : IXP {} not implemented in ixp_to_limit_str".format(ixp))
+		return community_str
+
+	def ixp_to_limit_str(self, ixp, peers):
+		### All of these are from jiangchen
+		## https://docs.google.com/document/d/1JzZHB68tfte3PX49d-YxY191mgbC2qoNoLxXtuwdue0/edit
+
+		community_str = ""
+		if ixp in ['63221', '24115', '62499', '6695', '43252', '47228', '56890', '56890', '19996','63221']:
+			community_str += "-c 0,{} ".format(ixp) # no export to any peer
+			for peer in peers:
+				community_str += '-c {},{}'.format(ixp,peer) # override no export to a specific peer
+		else:
+			print("WARNING : IXP {} not implemented in ixp_to_limit_str".format(ixp))
+		return community_str
 
 	def advertise_to_peers(self, pop, peers, pref, **kwargs):
 		## check to make sure we're not advertising already
-		cmd_out = self._check_output("sudo client/peering bgp adv {}".format(pop),careful=CAREFUL)
+		cmd_out = self._check_output("sudo client/peering bgp adv vtr{}".format(pop),careful=CAREFUL)
 		if cmd_out is not None:
 			if pref in cmd_out.decode():
+				print("WARNING ---- ALREADY ADVERTISING {} TO {}".format(pref, pop))
+				time.sleep(5)
 				self.withdraw_from_pop(pop, pref)
 
 		if self.system == 'peering':
@@ -408,7 +460,7 @@ class Deployment_Measure_Wrapper():
 		elif self.system == 'vultr':
 			#https://github.com/vultr/vultr-docs/tree/main/faq/as20473-bgp-customer-guide#readme
 			community_str = self.get_communtiy_str_vultr_adv_to_peers(pop, peers)				
-			self._call("sudo client/peering prefix announce -m {} {} {}".format(
+			self._call("sudo client/peering prefix announce -m vtr{} {} {}".format(
 				pop, community_str, pref),careful=CAREFUL, **kwargs)
 			pass
 
@@ -429,13 +481,13 @@ class Deployment_Measure_Wrapper():
 
 	def advertise_to_pop(self, pop, pref, **kwargs):
 		## Advertises to all peers at a single pop
-		self._call("sudo client/peering prefix announce -m {} {}".format(
+		self._call("sudo client/peering prefix announce -m vtr{} {}".format(
 				pop, pref),careful=CAREFUL,**kwargs)
 
 	def advertise_to_pops(self, pops, pref, **kwargs):
 		for i,pop in enumerate(pops):
 			## Advertises to all peers at a single pop
-			self._call("sudo client/peering prefix announce -m {} {}".format(
+			self._call("sudo client/peering prefix announce -m vtr{} {}".format(
 					pop, pref),careful=CAREFUL,**kwargs,override_rfd=(i>0)) 
 
 	def withdraw_from_pop(self, pop, pref):
@@ -445,19 +497,19 @@ class Deployment_Measure_Wrapper():
 				pop, self.peer_to_id[pop, peer], pref),careful=CAREFUL)
 		elif self.system == 'vultr':
 			# just do the opposite of advertise
-			self._call("sudo client/peering prefix withdraw -m {} {} &".format(
+			self._call("sudo client/peering prefix withdraw -m vtr{} {} &".format(
 				pop, pref),careful=CAREFUL)
 
 	def announce_anycast(self, pref=None):
 		if pref is None:
 			pref = self.get_most_viable_prefix()
 		for i, pop in enumerate(self.pops):
-			self._call("sudo client/peering prefix announce -m {} {}".format(
+			self._call("sudo client/peering prefix announce -m vtr{} {}".format(
 				pop, pref),careful=CAREFUL,override_rfd=(i>0)) 
 		return pref
 	def withdraw_anycast(self, pref):
 		for pop in self.pops:
-			self._call("sudo client/peering prefix withdraw -m {} {}".format(
+			self._call("sudo client/peering prefix withdraw -m vtr{} {}".format(
 				pop, pref),careful=CAREFUL)
 
 	def get_condensed_targets(self, ips):
@@ -483,7 +535,7 @@ class Deployment_Measure_Wrapper():
 
 	def get_advertisements_prioritized(self, exclude_providers=False):
 		### Returns a set of <prefix, popps> to advertise
-
+		np.random.seed(31415)
 		already_completed_popps = []
 		if os.path.exists(self.already_completed_popps_fn):
 			already_completed_popps = [tuple(row.strip().split(',')) for row in open(self.already_completed_popps_fn,'r')]
@@ -508,18 +560,21 @@ class Deployment_Measure_Wrapper():
 				pass
 			return 0
 
-		all_popps = [(pop,peer) for pop in self.peers for peer in self.peers[pop]]
+		all_popps = list(self.popps)
 		popps_to_focus_on = get_difference(all_popps, already_completed_popps)
+		print("{} popps total, {} left to measure to".format(len(all_popps), len(popps_to_focus_on)))
 
 		if exclude_providers:
-			popps_to_focus_on = get_difference(all_popps, self.provider_popps)
+			popps_to_focus_on = get_difference(popps_to_focus_on, self.provider_popps)
+			print("After removing providers, {} popps".format(len(popps_to_focus_on)))
+			popps_to_focus_on = get_intersection(popps_to_focus_on, self.popp_to_clientasn) # focus on popps with clients
+			print("After removing popps with no clients, {} popps".format(len(popps_to_focus_on)))
 
-		popps_to_focus_on = get_intersection(popps_to_focus_on, self.popp_to_clientasn) # focus on popps with clients
 		# TODO -- implement larger ASNs
 		popps_to_focus_on = [popp for popp in popps_to_focus_on if int(popp[1]) <= 65000]
-
-		if self.limit_pops:
-			popps_to_focus_on = [(pop,peer) for pop,peer in popps_to_focus_on if pop in self.include_pops]
+		print("Limiting to {} popps with ASNs we've implemented".format(len(popps_to_focus_on)))
+		popps_to_focus_on = [(pop,peer) for pop,peer in popps_to_focus_on if pop in self.pops]
+		print("Limiting to {} popps with at PoPs we're focusing on".format(len(popps_to_focus_on)))
 
 		t_start = time.time()
 		n_gotten = 0
@@ -539,7 +594,7 @@ class Deployment_Measure_Wrapper():
 				# see if we can find something to add to the set
 				found=False
 				n_fails = 0
-				for p in get_difference(ranked_popps,this_set):
+				for p in sorted(get_difference(ranked_popps,this_set)):
 					if p in self.provider_popps:
 						## Trivially overlaps with everything
 						this_set = [p]
@@ -596,10 +651,8 @@ class Deployment_Measure_Wrapper():
 						n_fails = 0
 						break
 					else:
-						if np.random.random() > .9:
-							print("{} -- {}, intersection: {}".format(
-								p,entry,get_intersection(this_clients_set,compare_clients_set)))
-							exit(0)
+						# print("{} -- {}, intersection: {}".format(
+						# 	p,entry,get_intersection(this_clients_set,compare_clients_set)[0:50]))
 						n_fails += 1
 						# shortcut -- assume that if it takes enough iters then there just won't be anything else
 						if n_fails == 20: 
@@ -629,17 +682,23 @@ class Deployment_Measure_Wrapper():
 				if popp in self.provider_popps: continue # trivial
 				ret[popp] = []
 				for asn in self.popp_to_clientasn.get(popp,[]):
-					ret[popp] += self.asn_to_clients.get(asn,[])
+					if verb:
+						print("Adding clients from asn {} since its a child of the popp {}".format(asn,popp))
+					ret[popp] += copy.deepcopy(self.asn_to_clients.get(asn,[]))
 					if verb:
 						if len(ret[popp]) == 0:
 							print("{} has no clients in client asn {}".format(popp,asn))
 			return ret
-	def get_popps_by_client(self, client):
+			
+	def get_popps_by_client(self, client, verb=False):
 		casn = self.utils.parse_asn(client)
 		if casn is None:
 			casn = ip32_to_24(client)
 
-		return self.clientasn_to_popp.get(casn, [])
+		if verb:
+			print("Popps for {} ({}) in data structure are {}".format(casn, client, self.clientasn_to_popp.get(casn) ))
+
+		return copy.deepcopy(self.clientasn_to_popp.get(casn, []))
 
 	def check_construct_client_to_peer_mapping(self, forceparse=False):
 		### Goal is to create client to popps mapping (so that we can create popp to clients mapping)
@@ -650,32 +709,44 @@ class Deployment_Measure_Wrapper():
 			pass
 		peer_to_clients_fn = os.path.join(CACHE_DIR, 'peer_to_clients.csv')
 		if not os.path.exists(peer_to_clients_fn) or forceparse:
+
+			vultr_peer_asns = list(set(self.utils.parse_asn(peer) for pop,peer in self.popps))
+			# peer_ccs = {}
+			# for peer in vultr_peer_asns:
+			# 	for peer_child in self.utils.get_cc(peer):
+			# 		try:
+			# 			peer_ccs[peer_child].append(peer)
+			# 		except KeyError:
+			# 			peer_ccs[peer_child] = [peer]
+			# peer_child_to_stats = {} # store CC size, number of peers its a child of
+			# for peer_child,peers in sorted(peer_ccs.items(), key = lambda el : -1 * len(el[1])):
+			# 	peer_child_to_stats[peer_child] = {'cc': len(self.utils.get_cc(peer_child)), 'n_peers': len(peers)}
+
+			# x = list([el['cc'] for el in peer_child_to_stats.values()])
+			# y = list([el['n_peers'] for el in peer_child_to_stats.values()])
+			# import matplotlib.pyplot as plt
+			# plt.scatter(x,y)
+			# plt.xlabel("CC Size")
+			# plt.ylabel("Number of Peers Child Of")
+			# plt.savefig('figures/bad_cc_investigation.pdf')
+
 			print("Creating popp to clients mapping")
-			network_to_peers_fn = os.path.join(DATA_DIR, '{}_network_to_peers.csv'.format(
-				self.system)) # from get_peers_from_routes
-			import pytricia
-			network_to_peers = pytricia.PyTricia()
-			for row in tqdm.tqdm(open(network_to_peers_fn,'r'),desc="Reading network to peers..."):
-				if row.startswith('pref'): continue
-				pref,peers = row.strip().split(',')
-				peers = peers.split('-')
-				network_to_peers[pref] = peers
-			print("Loading clients...")
 			clients = self.get_reachable_clients(limit=False)
 			# self.utils.lookup_asns_if_needed(list(set([ip32_to_24(addr) for addr in clients])))
 
+			
 			asn_to_parents = {}
 			all_asns = set(list(self.utils.cc_cache)).union(set(self.utils.parse_asn(client) for client in clients))
 			all_asns = all_asns.union(set(list(self.utils.as_to_customers)))
-			for asn in tqdm.tqdm(all_asns, desc="Parsing CC data from CAIDA to tabulate parents and children..."):
-				for child_asn in self.utils.get_cc(asn):
+			for parent in tqdm.tqdm(all_asns, desc="Parsing CC data from CAIDA to tabulate parents and children..."):
+				for child in self.utils.get_cc(parent):
 					try:
-						asn_to_parents[child_asn][asn] = None
+						asn_to_parents[child][parent] = None
 					except KeyError:
-						asn_to_parents[child_asn] = {asn: None}
+						asn_to_parents[child] = {parent: None}
 
 			for row in tqdm.tqdm(open(os.path.join(CACHE_DIR, '{}_customer_cone_from_routes.csv'.format(
-				self.system)),'r'),desc="Reading customer cone data from Vultr routes..."):
+				self.system)),'r'), desc="Reading customer cone data from Vultr routes..."):
 				if row.startswith('parent'): continue
 				parent,children = row.strip().split(',')
 				parent = self.utils.parse_asn(parent)
@@ -685,17 +756,18 @@ class Deployment_Measure_Wrapper():
 						asn_to_parents[child][parent] = None
 					except KeyError:
 						asn_to_parents[child] = {parent: None}
-				for asn in self.utils.get_cc(parent):
+				for child in self.utils.get_cc(parent):
 					try:
-						asn_to_parents[asn][parent] = None
+						asn_to_parents[child][parent] = None
 					except KeyError:
-						asn_to_parents[asn] = {parent: None}
+						asn_to_parents[child] = {parent: None}
+			pcone_of_interest = asn_to_parents.get(self.utils.parse_asn('62490'))
 
 			default_current_cone = {self.utils.parse_asn(asn):None for asn in self.provider_peers}
-			print(self.utils.parse_asn('6939') in default_current_cone)
 			pcone_cache = {}
-			def get_parent_cone(asn, current_cone=default_current_cone, 
+			def get_parent_cone(asn, current_cone={}, 
 				recursion_allowed = 0, dbg = False):
+				current_cone = copy.deepcopy(current_cone)
 				current_cone[asn] = None
 				try:
 					if not dbg:
@@ -704,13 +776,18 @@ class Deployment_Measure_Wrapper():
 						print("in get parent cone for asn {}".format(asn))
 				except KeyError:
 					pass
-				last_length = len(current_cone)
-				this_length = -1
+				last_length = -1
+				this_length = len(current_cone)
 				while last_length != this_length:
+					if dbg: print("{} {}".format(last_length, this_length))
 					for parent in asn_to_parents.get(asn, []):
+						if dbg:
+							print("raw parent: {}".format(parent))
 						if parent == asn: continue
 						try:
 							default_current_cone[parent]
+							if dbg:
+								print("skipping parent {} because its in dcc".format(parent))
 							continue # trivial
 						except KeyError:
 							pass
@@ -720,8 +797,8 @@ class Deployment_Measure_Wrapper():
 							try:
 								current_cone[parent]
 							except KeyError:
-								for gparent in get_parent_cone(parent, copy.deepcopy(current_cone),
-								 	recursion_allowed - 1, dbg=dbg):
+								for gparent in get_parent_cone(parent, current_cone=copy.deepcopy(current_cone),
+								 	recursion_allowed=recursion_allowed - 1, dbg=dbg):
 									if dbg:
 										print("{} a parent of {}, adding".format(gparent, parent))
 									current_cone[gparent] = None
@@ -738,15 +815,14 @@ class Deployment_Measure_Wrapper():
 
 			peer_to_client_asns = {}
 			asn_to_clients = {}
-			vultr_peer_asns = list(set(self.utils.parse_asn(peer) for pop,peer in self.popps))
-			## they share ('tokyo', '42') -- ('newyork', '62668')
-			client_asns_debug = [self.utils.parse_asn('62490')]#[self.utils.parse_asn(asn) for asn in ['140659', '133249', '57713']]
+			client_asns_debug = []
 			for client in tqdm.tqdm(clients, desc="Forming peer to client mapping..."):
-				ntwrk = network_to_peers.get_key(client)
-				if ntwrk is None:
-					continue
-				this_client_asn = self.utils.parse_asn(ntwrk)
-				
+				# ntwrk = network_to_peers.get_key(client)
+				# if ntwrk is None:
+				# 	continue
+				this_client_asn = self.utils.parse_asn(client)
+				# this_client_asn = self.utils.parse_asn('8048')
+				if this_client_asn is None: continue
 				try:
 					asn_to_clients[this_client_asn].append(client)
 					continue
@@ -766,13 +842,13 @@ class Deployment_Measure_Wrapper():
 						peer_to_client_asns[peer] = {this_client_asn: None}
 
 			with open(peer_to_clients_fn, 'w') as f:
-				for peer,clients in peer_to_client_asns.items():
-					for client in clients:
+				for peer,this_peer_clients in peer_to_client_asns.items():
+					for client in this_peer_clients:
 						f.write("{},{}\n".format(peer,client))
 
 			with open(asn_to_clients_fn, 'w') as f:
-				for asn,clients in asn_to_clients.items():
-					for client in clients:
+				for asn,this_asn_clients in asn_to_clients.items():
+					for client in this_asn_clients:
 						f.write('{},{}\n'.format(asn,client))
 				
 			del clients
@@ -784,6 +860,7 @@ class Deployment_Measure_Wrapper():
 			peer,client = row.strip().split(',')
 			peer = self.utils.parse_asn(peer)
 			client = self.utils.parse_asn(client)
+			if peer is None or client is None: continue
 			for _peer in self.utils.org_to_as.get(peer, [peer]):
 				for pop in self.peer_to_pops.get(_peer,[]):
 					try:
@@ -794,6 +871,7 @@ class Deployment_Measure_Wrapper():
 		for row in tqdm.tqdm(open(asn_to_clients_fn,'r'),desc="Loading asn to clients fn..."):
 			asn,client = row.strip().split(',')
 			asn = self.utils.parse_asn(asn)
+			if asn is None: continue
 			try:
 				self.asn_to_clients[asn].append(client)
 			except KeyError:
@@ -802,14 +880,14 @@ class Deployment_Measure_Wrapper():
 		limit_to_max = 1000
 		np.random.seed(31415)
 		for asn in sorted(self.asn_to_clients, key = lambda el : int(el)):
-			clients = self.asn_to_clients[asn]
-			np.random.shuffle(clients)
-			self.asn_to_clients[asn] = clients[0:limit_to_max]
+			this_asn_clients = self.asn_to_clients[asn]
+			np.random.shuffle(this_asn_clients)
+			self.asn_to_clients[asn] = this_asn_clients[0:limit_to_max]
 
 		print("{} popps with clients".format(len(self.popp_to_clientasn)))
 		#### Create popp to asn mapping to make conflict finding easier
 		self.clientasn_to_popp = {}
-		for popp,clients in tqdm.tqdm(self.popp_to_clientasn.items(),
+		for popp,this_popp_clients in tqdm.tqdm(self.popp_to_clientasn.items(),
 			desc="tabulating clientasn to popp mapping..."):
 			if popp in self.provider_popps: continue
 			# ## Exclude clients which we know don't have a path
@@ -822,14 +900,16 @@ class Deployment_Measure_Wrapper():
 			# 		bad_clients.append(row.strip())
 			# 	self.popp_to_clientasn[popp] = get_difference(self.popp_to_clientasn[popp], bad_clients)
 
-			for client in clients:
+			for client in this_popp_clients:
 				try:
 					self.clientasn_to_popp[client].append(popp)
 				except KeyError:
 					self.clientasn_to_popp[client] = [popp]
 		for casn,popps in self.clientasn_to_popp.items():
 			self.clientasn_to_popp[casn] = list(set(popps))
-
+		# for popp,casns in self.popp_to_clientasn.items():
+		# 	if len(casns) > 20000:
+		# 		print("{} has {} client ASNs".format(popp,len(casns)))
 		n_clients_per_popp = list([len(self.popp_to_clientasn[popp]) for popp in self.popp_to_clientasn])
 		x,cdf_x = get_cdf_xy(n_clients_per_popp,logx=True)
 		import matplotlib.pyplot as plt
@@ -984,6 +1064,7 @@ class Deployment_Measure_Wrapper():
 			if popp in self.provider_popps: continue
 			these_clients = meas_by_popp.get(popp, [])
 			interesting_clients = interesting_clients + these_clients
+		
 
 		interesting_clients = list(set(interesting_clients))
 		print("Limited {} clients to {} clients.".format(len(clients), len(interesting_clients)))
@@ -1091,27 +1172,27 @@ class Deployment_Measure_Wrapper():
 
 		return responsive_dsts
 
-	def conduct_measurements_to_prefix_popps(self, prefix_popps, every_client_of_interest, popp_lat_fn, **kwargs):
+	def conduct_measurements_to_prefix_popps(self, prefix_popps, every_client_of_interest, 
+		popp_lat_fn, **kwargs):
+		### Prefix_popps is a list of sets of popps, where each element in the list is the set of popps you'd like to advertise
+		### the same prefix to
+		### every_client_of_interest is either a single array of clients who you want to limit (every advertisement's)
+		### focus to, or a list of clients correponding to those prefix_popps
+		### popp_lat_fn is the output filename
 		n_prefs = len(self.available_prefixes)
 		n_adv_rounds = int(np.ceil(len(prefix_popps) / n_prefs))
 		pw = Pinger_Wrapper(self.pops, self.pop_to_intf)
 
-		# measuring_to_client_ns = []
-		# for adv_set in prefix_popps:
-		# 	for popp in adv_set:
-		# 		these_clients = get_intersection(every_client_of_interest, self.popp_to_clients[popp])
-		# 		measuring_to_client_ns.append(len(these_clients))
-		# import matplotlib.pyplot as plt
-		# x,cdf_x = get_cdf_xy(measuring_to_client_ns,logx=True)
-		# plt.semilogx(x,cdf_x)
-		# plt.xlabel("Number of Clients We're Measuring To")
-		# plt.ylabel("CDF of PoPPs We Need to Measure To")
-		# plt.savefig("figures/n_clients_measuring_to_per_popp.pdf")
+		using_manual_clients = kwargs.get('using_manual_clients', False)
 
 		only_providers = kwargs.get('only_providers', False)
+		np.random.seed(31415)
+
+		propagate_time = kwargs.get('propagate_time', 10)
 
 		for adv_round_i in range(n_adv_rounds):
-			self.measure_vpn_lats()
+			if not CAREFUL:
+				self.measure_vpn_lats()
 			adv_sets = prefix_popps[n_prefs * adv_round_i: n_prefs * (adv_round_i+1)]
 			for asi,adv_set in enumerate(adv_sets):
 				print("Adv set {}:\n {}".format(asi,adv_set))
@@ -1121,7 +1202,10 @@ class Deployment_Measure_Wrapper():
 			pops_set = {}
 			adv_set_to_taps = {}
 			for i, popps in enumerate(adv_sets):
-				pref = self.get_most_viable_prefix()
+				if not CAREFUL:
+					pref = self.get_most_viable_prefix()
+				else:
+					pref = self.available_prefixes[i]
 				pref_set.append(pref)
 				measurement_src_ip = pref_to_ip(pref)
 				srcs.append(measurement_src_ip)
@@ -1131,6 +1215,18 @@ class Deployment_Measure_Wrapper():
 				pops = list(set([popp[0] for popp in popps])) # pops corresponding to this prefix
 				pops_set[i] = pops
 				adv_set_to_taps[i] = [self.pop_to_intf[pop] for pop in pops]
+
+			if using_manual_clients:
+				for pref,adv_set in zip(pref_set, adv_sets):
+					print(adv_set)
+					advsetstr = "--".join("-".join(list(el)) for el in adv_set)
+					print(advsetstr)
+					with open(popp_lat_fn, 'a') as f:
+						f.write("{},{}\n".format(pref,advsetstr))
+
+			if not CAREFUL:
+				print("Waiting {}s for announcements to propagate...".format(propagate_time))
+				time.sleep(propagate_time)
 			max_n_pops = max(len(v) for v in adv_set_to_taps.values())	
 			for pop_iter in range(max_n_pops):
 				srcs_set = []
@@ -1146,19 +1242,26 @@ class Deployment_Measure_Wrapper():
 						srcs_set.append(srcs[adv_set_i])
 						this_pop = pops_set[adv_set_i][pop_iter] # one pop at a time
 						this_pops_set.append(this_pop)
-						if not only_providers:
-							these_clients = set()
-							for popp in popps_set[adv_set_i]:
-								## Get any client who we know can route through these ingresses
-								if popp[0] != this_pop: continue ## popps corresponding to focused pop
-								this_popp_clients = list(self.get_clients_by_popp([popp],verb=True).values())[0]
-								these_clients = these_clients.union(set(this_popp_clients))
-								these_clients = set(get_intersection(these_clients, every_client_of_interest))
-						else:
-							these_clients = every_client_of_interest
-						clients_set.append(list(these_clients))
 						adv_set_is.append(adv_set_i)
+						if not using_manual_clients:
+							if not only_providers:
+								these_clients = set()
+								for popp in popps_set[adv_set_i]:
+									# print("Adding clients in adv set {}, popp {}".format(adv_set_i,popp))
+									## Get any client who we know can route through these ingresses
+									if popp[0] != this_pop: continue ## popps corresponding to focused pop
+									this_popp_clients = list(self.get_clients_by_popp([popp]).values())[0]
+									these_clients = these_clients.union(set(this_popp_clients))
+									these_clients = set(get_intersection(these_clients, every_client_of_interest))
+							else:
+								these_clients = every_client_of_interest
+							clients_set.append(sorted(list(these_clients)))
+						else:
+							### manually setting the clients to ping
+							clients_set.append(every_client_of_interest[adv_round_i * 6 + adv_set_i])
 					except IndexError:
+						import traceback
+						traceback.print_exc()
 						pass
 				print("PoP iter {}".format(pop_iter))
 				print(srcs_set)
@@ -1168,56 +1271,98 @@ class Deployment_Measure_Wrapper():
 				print("Client set lens: {}".format([len(dsts) for dsts in clients_set]))
 
 				if CAREFUL:
+					t_meas = int(time.time())
+					if not using_manual_clients:
+						for src,pop,dsts,asi in zip(srcs_set, this_pops_set, clients_set, adv_set_is):
+							print("{} {}".format(asi, popps_set[asi]))
+							with open(popp_lat_fn,'a') as f:
+								for client_dst in dsts:
+									if len(popps_set[asi]) == 1:
+										if popps_set[asi][0] in self.provider_popps:
+											client_has_path = [popps_set[asi][0]]
+										else:
+											client_has_path = get_intersection(self.get_popps_by_client(client_dst), popps_set[asi])
+									else:
+										client_has_path = get_intersection(self.get_popps_by_client(client_dst), popps_set[asi])
+
+									if len(client_has_path) != 1:
+										print("WEIRDNESS -- client {} should have one path to \n{}\n but has many/none {}".format(
+											client_dst,popps_set[asi],self.get_popps_by_client(client_dst,verb=True)))
+										print("{} {} {}".format(src,pop,client_has_path))
+										exit(0)
+										continue
+									clientpathpop, clientpathpeer = client_has_path[0]
+									if clientpathpop != pop:
+										print("Client path pop != pop for {}, {} vs {}".format(client_dst,clientpathpop,pop))
+										exit(0)
+										continue
 					exit(0)
 				lats_results = pw.run(srcs_set, taps_set, clients_set,
-					remove_bad_meas=True)
+					remove_bad_meas=False)
+				pickle.dump([lats_results, srcs_set, this_pops_set,clients_set, adv_set_is], open('tmp/tmp.pkl','wb'))
 
 				t_meas = int(time.time())
 				for src,pop,dsts,asi in zip(srcs_set, this_pops_set, clients_set, adv_set_is):
 					with open(popp_lat_fn,'a') as f:
 						for client_dst in dsts:
-							if len(popps_set[asi]) == 1:
-								if popps_set[asi][0] in self.provider_popps:
-									client_has_path = [popps_set[asi][0]]
+							if not using_manual_clients:
+								if len(popps_set[asi]) == 1:
+									if popps_set[asi][0] in self.provider_popps:
+										client_has_path = [popps_set[asi][0]]
+									else:
+										client_has_path = get_intersection(self.get_popps_by_client(client_dst), popps_set[asi])
 								else:
 									client_has_path = get_intersection(self.get_popps_by_client(client_dst), popps_set[asi])
-							else:
-								client_has_path = get_intersection(self.get_popps_by_client(client_dst), popps_set[asi])
 
-							if len(client_has_path) != 1:
-								print("WEIRDNESS -- client {} should have one path to {} but has many/none {}".format(
-									client_dst,popps_set[asi],self.get_popps_by_client(client_dst)))
-								print("{} {} {}".format(src,pop,client_has_path))
-								continue
-							clientpathpop, clientpathpeer = client_has_path[0]
-							if clientpathpop != pop:
-								print("Client path pop != pop for {}, {} vs {}".format(client_dst,clientpathpop,pop))
-								continue
-							rtts = []
-							for meas in lats_results[src].get(client_dst, []):
-								### For this advertisement, there's only one ingress this client has a valid path to
-								if meas.get('startpop','start') != meas.get('endpop','end'): continue
-								if meas['pop'] != pop or meas['rtt'] is None:
+								if len(client_has_path) != 1:
+									print("WEIRDNESS -- client {} should have one path to \n{}\n but has many/none {}".format(
+										client_dst,popps_set[asi],self.get_popps_by_client(client_dst,verb=True)))
+									print("{} {} {}".format(src,pop,client_has_path))
 									continue
-								rtts.append(meas['rtt'])
-							if len(rtts) > 0:
-								rtt = np.min(rtts)
-								f.write("{},{},{},{},{},{}\n".format(t_meas,client_dst,
-									clientpathpop,clientpathpeer,round(rtt,4),round(rtt - self.pop_vpn_lats[pop],4)))
+								clientpathpop, clientpathpeer = client_has_path[0]
+								if clientpathpop != pop:
+									print("Client path pop != pop for {}, {} vs {}".format(client_dst,clientpathpop,pop))
+									continue
+								rtts = []
+								for meas in lats_results[src].get(client_dst, []):
+									### For this advertisement, there's only one ingress this client has a valid path to
+									if meas.get('startpop','start') != meas.get('endpop','end'): continue
+									if meas['pop'] != pop or meas['rtt'] is None:
+										continue
+									rtts.append(meas['rtt'])
+								if len(rtts) > 0:
+									rtt = np.min(rtts)
+									f.write("{},{},{},{},{},{}\n".format(t_meas,client_dst,
+										clientpathpop,clientpathpeer,round(rtt,4),round(rtt - self.pop_vpn_lats[pop],4)))
+								else:
+									### Need to save the information that this client could not reach its
+									### intended destination, even though we thought it might have
+									with open(os.path.join(CACHE_DIR, "unreachable_dsts", "{}-{}.csv".format(
+										clientpathpop,clientpathpeer)),'a') as f2:
+										f2.write("{}\n".format(client_dst))
 							else:
-								### Need to save the information that this client could not reach its
-								### intended destination, even though we thought it might have
-								with open(os.path.join(CACHE_DIR, "unreachable_dsts", "{}-{}.csv".format(
-									clientpathpop,clientpathpeer)),'a') as f2:
-									f2.write("{}\n".format(client_dst))
+								rtts = []
+								for meas in lats_results[src].get(client_dst, []):
+									### For this advertisement, there's only one ingress this client has a valid path to
+									if meas.get('startpop','start') != meas.get('endpop','end'): continue
+									if meas['pop'] != pop or meas['rtt'] is None:
+										continue
+									rtts.append(meas['rtt'])
+								if len(rtts) > 0:
+									rtt = np.min(rtts)
+									f.write("{},{},{},{},{},{}\n".format(src,t_meas,client_dst,
+										pop,round(rtt,4),round(rtt - self.pop_vpn_lats[pop],4)))
+
+
 				del lats_results
 			for pref, popps in zip(pref_set, popps_set):
 				for pop in set([popp[0] for popp in popps]):
 					self.withdraw_from_pop(pop, pref)
-			with open(self.already_completed_popps_fn, 'a') as f:
-				for popps in popps_set:
-					for pop,peer in popps:
-						f.write("{},{}\n".format(pop,peer))
+			if kwargs.get('logcomplete',True):
+				with open(self.already_completed_popps_fn, 'a') as f:
+					for popps in popps_set:
+						for pop,peer in popps:
+							f.write("{},{}\n".format(pop,peer))
 
 	def check_load_pop_to_clients(self):
 		try:
@@ -1227,15 +1372,13 @@ class Deployment_Measure_Wrapper():
 			pass
 		## Natural client to PoP mapping for an anycast advertisement, learned from measurements
 		self.pop_to_clients = {pop:[] for pop in self.pops}
-		self.pop_to_clients_fn = os.path.join(DATA_DIR, 'client_to_pop.csv')
 		self.client_to_pop = {}
 		print("Loading PoP to clients...")
 		if os.path.exists(self.pop_to_clients_fn):
 			for row in open(self.pop_to_clients_fn, 'r'):
 				client,pop = row.strip().split(',')
-				if self.limit_pops:
-					if pop not in self.include_pops:
-						continue
+				if pop not in self.pops:
+					continue
 				self.pop_to_clients[pop].append(client)
 				self.client_to_pop[client] = pop
 
@@ -1278,19 +1421,26 @@ class Deployment_Measure_Wrapper():
 				
 		self.all_client_addresses_from_msft = set(self.all_client_addresses_from_msft)
 		self.check_load_addresses_that_respond_to_ping()
-		self.all_client_addresses_from_msft = list(set(self.all_client_addresses_from_msft + self.addresses_that_respond_to_ping[1]))
+		self.all_client_addresses_from_msft = list(set(list(self.all_client_addresses_from_msft) + list(self.addresses_that_respond_to_ping[1])))
 	
-
+		import bz2
+		these_ips = []
+		for row in tqdm.tqdm(bz2.open(os.path.join(DATA_DIR ,'internet_address_hitlist_it105w-20230926.fsdb.bz2'), 'r'),
+			desc="Reading hitlist from Loqman..."):
+			row = row.decode()
+			if row.startswith('#'): continue
+			row = row.strip().split('\t')
+			these_ips.append(row[2])
+		self.all_client_addresses_from_msft = set(self.all_client_addresses_from_msft).union(set(these_ips))
 		### basically the ISI hitlist
 		for fn in tqdm.tqdm(glob.glob(os.path.join(DATA_DIR, "hitlist_from_jiangchen", "*")),
 			desc="Loading hitlists from JC"):
-			if self.limit_pops:
-				pop = re.search("anycast\_ip\_(.+)\.txt",fn).group(1)
-				if pop not in self.include_pops:
-					continue
+			pop = re.search("anycast\_ip\_(.+)\.txt",fn).group(1)
+			if pop not in self.pops:
+				continue
 			these_ips = set([row.strip() for row in open(fn,'r').readlines()])
 			self.all_client_addresses_from_msft = set(self.all_client_addresses_from_msft).union(these_ips)
-		self.all_client_addresses_from_msft = get_difference(self.all_client_addresses_from_msft, self.multipop_clients)
+
 		self.check_load_addresses_that_respond_to_ping()
 		ugs_in_ping = {}
 		for ip in self.addresses_that_respond_to_ping[1]:
@@ -1306,3 +1456,9 @@ class Deployment_Measure_Wrapper():
 				lat,lon = ug_to_loc[ug]
 				f.write("{},{},{}\n".format(lat,lon,self.ug_to_vol[ug]))
 		self.all_client_addresses_from_msft = list(self.all_client_addresses_from_msft)
+
+
+if __name__ == "__main__":
+	dmw = Deployment_Measure_Wrapper()
+	dmw.recalc_probable_clients = True
+	dmw.check_construct_client_to_peer_mapping(forceparse=True)	

@@ -14,7 +14,6 @@ class AS_Utils_Wrapper:
 	"""Helper class that loads utilities for working with ASNs."""
 	def __init__(self, *args, **kwargs):
 		self.asn_cache_file = "ip_to_asn.csv" # we slowly build the cache over time, as we encounter IP addresses
-		self.as_siblings = {}
 		self.ip_to_asn = {}
 		self.as_rel = {}
 		self.ql = kwargs.get('quickload',False)
@@ -289,19 +288,28 @@ class AS_Utils_Wrapper:
 			self.get_cc(a)
 		pickle.dump(self.cc_cache, open(cc_cache_fn, 'wb'))	
 
-	def get_cc(self, asn):
+	def get_cc(self, asn, dbg=False):
 		"""Get customer cone of an asn, according to our AS relationship data."""
 		found = {}
-		def get_customers(_asn):
+		def get_customers(_asn, dbg=dbg):
 			ret = [_asn]
 			try:
-				ret = ret + self.cc_cache[_asn]
+				if not dbg:
+					ret = ret + self.cc_cache[_asn]
+				else:
+					raise KeyError
 			except KeyError:
 				try:
 					for customer in self.as_to_customers[_asn]:
-						if customer in found: continue
+						try:
+							found[customer]
+							continue
+						except KeyError:
+							pass
+						if dbg:
+							print("Adding customer {}, parent is {}".format(customer, _asn))
 						found[customer] = None
-						this_asn_cc = get_customers(customer)
+						this_asn_cc = get_customers(customer,dbg=dbg)
 						ret = ret + this_asn_cc
 				except KeyError:
 					pass
@@ -388,8 +396,13 @@ class AS_Utils_Wrapper:
 		# In most places, we treat ASes as the same if they are siblings (\ie owned by the same organization)
 		# We treat siblings the same since treating siblings separatetly would make the logic for various things
 		# like calculating if a route is Valley Free uglier
-		if self.as_siblings != {}: return
+		try:
+			self.as_siblings
+			return
+		except AttributeError:
+			pass
 		print("Loading siblings")
+		self.as_siblings = {}
 		uid = int(1e6) # each organization is defined as an integer > 1e6 since real ASNs are less than 1e6
 		def check_add_siblings(sib1, sib2, uid,v=0):
 			# Check to see if we have created sibling groups for either of these AS's
@@ -437,6 +450,7 @@ class AS_Utils_Wrapper:
 		siblings_fn = os.path.join(DATA_DIR, self.siblings_fns[2])
 		siblings_data_obj = json.load(open(siblings_fn,'r')) # NOTE -- Microsoft siblings data provides no new information afaik
 		for k,v in siblings_data_obj.items():
+			break ### TURNS OFF LOADING SIBLINGS
 			as0 = v['siblingAs'][0]
 			for as1 in v['siblingAs'][1:]:
 				uid = check_add_siblings(str(as0), str(as1), uid,v=1)
@@ -449,7 +463,7 @@ class AS_Utils_Wrapper:
 				self.org_to_as[org_id] = []
 			self.org_to_as[org_id].append(sib_as)
 
-		self.msft_org = self.as_siblings['8075']
+		self.msft_org = self.as_siblings.get('8075', '8075')
 
 class Atlas_Wrapper(AS_Utils_Wrapper):
 	"""Helper functions associated mostly with parsing RIPE Atlas measurements."""

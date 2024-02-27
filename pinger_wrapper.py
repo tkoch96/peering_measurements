@@ -2,6 +2,7 @@ import socket, time, struct, select, numpy as np, re, datetime, tqdm, multiproce
 from config import *
 import netifaces as ni, os
 from subprocess import call, check_output
+from helpers import *
 
 # PINGER = "sudo /home/tom/pinger/target/release/pinger"
 PINGER = "sudo /home/ubuntu/pinger/target/release/pinger"
@@ -155,7 +156,7 @@ class Pinger_Wrapper:
 					if time.time() - tstart > max_time_allowed:
 						break
 				# Wait for tcpdump to finish writing
-				time.sleep(10)
+				time.sleep(5)
 		except:
 			import traceback
 			traceback.print_exc()
@@ -206,12 +207,21 @@ class Pinger_Wrapper:
 										range(self.n_rounds)]
 								meas_ret[src][dst][i][k] = ret[src][dst][i][k]
 
+		all_seen_pops = {}
 		for src in meas_ret:
 			for dst in meas_ret[src]:
 				for meas in meas_ret[src][dst]:
 					if meas['t_start'] is not None and meas['t_end'] is not None \
 					 and meas['t_end'] - meas['t_start'] > 0:
 						meas['rtt'] = meas['t_end'] - meas['t_start']
+					if meas.get('endpop') is not None:
+						all_seen_pops[meas['endpop']] = None
+		not_seen_pops = get_difference(self.pops,all_seen_pops)
+		if len(not_seen_pops) > 0:
+			### indicates that there may be a problem with the mux
+			print("{} WARNING IN PINGER_WRAPPER --- DIDNT SEE POPS {} AT ALL".format(int(time.time()),
+				not_seen_pops))
+
 		if kwargs.get('remove_bad_meas', False):
 			for src in meas_ret:
 				for dst, meas in meas_ret[src].items():

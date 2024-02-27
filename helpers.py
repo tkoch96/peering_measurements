@@ -120,7 +120,7 @@ def single_process_parse(args, **kwargs):
 		pop,peer = row.strip().split(',')
 		provider_popps.append((pop,peer))
 
-	exclude_providers = True
+	exclude_providers = False
 	if exclude_providers:
 		print("\n")
 		print("_-__----_-_-NOTE EXCLUDING PROVIDERS FROM PARSE__- --s-df-sdf-s")

@@ -20,7 +20,7 @@ customer_out_fn = os.path.join(DATA_DIR, 'vultr_customers.csv')
 pref_to_asn_out_fn = os.path.join(DATA_DIR, 'vultr_network_to_peers.csv')
 cc_out_fn = os.path.join(CACHE_DIR, 'vultr_customer_cone_from_routes.csv')
 
-if True:
+if False:
 	#### Make sure you actually want to parse all the routes, this rewrites the file
 	with open(all_peers_out_fn,'w') as f:
 		f.write('pop,peer,next_hop,type,ixp\n')
@@ -194,3 +194,34 @@ for pop,peer in custs:
 u,c = np.unique(list(tuple(sorted(list(set(vals)))) for vals in cust_to_tp.values()), return_counts=True)
 for _u,_c in zip(u,c):
 	print("{} -- {}".format(_u,_c))
+
+
+popps = {}
+for row in open(all_peers_out_fn_inference, 'r'):
+	if row.startswith('pop'): continue
+	pop,peer,nh,tp,ixp = row.strip().split(',')
+	try:
+		popps[pop,peer].append(tp)
+	except KeyError:
+		popps[pop,peer] = [tp]
+pop_asn_roughtypefn = 'cache/vultr_pop_asn_type.csv'
+with open(pop_asn_roughtypefn, 'w') as f:
+	for (pop,peer),tps in popps.items():
+		# if 'provider' in tps:
+		# 	tp = 'provider'
+		# elif 'customer' in tps:
+		# 	tp = 'customer'
+		# elif 'ixp_direct' in tps or 'privatepeer' in tps:
+		# 	tp = 'peer'
+		# elif 'routeserver' in tps:
+		# 	tp = 'route_server_peer'
+		# else:
+		# 	raise ValueError("Unrecognized type options for {} : {}".format(popp,tps))
+		for tp in list(sorted(set(tps))):
+			f.write("{},{},{}\n".format(pop,peer,tp))
+
+
+
+
+
+

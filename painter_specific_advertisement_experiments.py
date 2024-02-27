@@ -47,7 +47,7 @@ class Painter_Specific_Advertisement_Experiments(Advertisement_Experiments):
 		need_meas_peers = get_difference(all_peers, meas_peers)
 		need_meas_peers = get_difference(all_peers, list([popp[1] for popp in already_completed_popps]))
 		print("Still need meas for {} peers".format(len(need_meas_peers)))
-		if len(need_meas_peers) > 0 and True:
+		if len(need_meas_peers) > 0 and False:
 			### TODO -- this doesn't really work
 			# from analyze_measurements import Measurement_Analyzer
 			# ma = Measurement_Analyzer()
@@ -72,6 +72,8 @@ class Painter_Specific_Advertisement_Experiments(Advertisement_Experiments):
 		
 		## pick clients who have a measurement to at least one non-provider
 		limited_every_client_of_interest = self.limit_to_interesting_clients(every_client_of_interest)
+		print("{} interesting clients. Getting latency to all the providers for these clients".format(
+			len(limited_every_client_of_interest)))
 		
 		## Get provider latency
 		prefix_popps = self.get_advertisements_prioritized(exclude_providers=False)
@@ -82,7 +84,7 @@ class Painter_Specific_Advertisement_Experiments(Advertisement_Experiments):
 		del have_anycast
 
 		self.conduct_measurements_to_prefix_popps(prefix_popps, limited_every_client_of_interest, popp_lat_fn,
-			only_providers=True)
+			only_providers=True, propagate_time=20)#20*60)
 
 	def conduct_painter(self):
 

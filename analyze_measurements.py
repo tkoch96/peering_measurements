@@ -9,48 +9,7 @@ from helpers import *
 from generic_measurement_utils import AS_Utils_Wrapper
 
 
-def read_lats_over_time():
-	ts = -np.inf
-	te = np.inf
-	i_to_popp = {}
-	i_to_targ = {}
 
-	print("Analyzing from times {} to {}".format(ts,te))
-	lat_fn = os.path.join(CACHE_DIR, "vultr_latency_over_time_case_study.csv")
-	lats_by_targ = {}
-	rowi=0
-	for row in tqdm.tqdm(open(lat_fn, 'r'),desc="reading latency measurements from VULTR."):
-		fields = row.strip().split(',')
-		if len(fields) == 3:
-			pop,peer,i = fields
-			i_to_popp[int(i)] = (pop,peer)
-			continue
-		elif len(fields) == 2:
-			targ,i = fields
-			i_to_targ[int(i)] = targ
-			continue
-		t_meas,client_dsti,poppi,lat = fields
-		if float(t_meas) < ts or float(t_meas) > te: continue 
-		try:
-			lats_by_targ[int(client_dsti)]
-		except KeyError:
-			lats_by_targ[int(client_dsti)] = {}
-		try:
-			lats_by_targ[int(client_dsti)][int(poppi)]
-		except KeyError:
-			lats_by_targ[int(client_dsti)][int(poppi)] = []
-		lat = int(np.ceil(float(lat) * 1000))
-		lats_by_targ[int(client_dsti)][int(poppi)].append((int(t_meas), lat))
-		if rowi == 10000000:
-			break
-		rowi+=1
-
-	print("Read {} lines".format(rowi))
-	return {
-		'lats_by_targ': lats_by_targ,
-		'i_to_popp': i_to_popp,
-		'i_to_targ': i_to_targ,
-	}
 
 
 class Measurement_Analyzer(AS_Utils_Wrapper):
@@ -112,6 +71,104 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		plt.xlabel('Number of unreachable targets')
 		plt.ylabel("CDF of PoPPs")
 		plt.savefig('figures/n_unreachable_targets_by_popp.pdf')
+
+	def jiangchen_nsdi_customer_cone_stats(self):
+		self.check_load_ae()
+		as_to_pop = {}
+		new_customer_cone = json.load(open(os.path.join(CACHE_DIR, 'jiangchen_customer_cone.json'),'r'))
+		new_customer_cone = {self.parse_asn(asn): [self.parse_asn(_asn) for _asn in asns] for asn,asns in new_customer_cone.items()}
+		rows = csv.reader(open(os.path.join(CACHE_DIR, 'aspop.csv'),'r'))
+		for row in rows:
+			asn = self.parse_asn(row[1][2:])
+			pop = float(row[6])
+			try:
+				as_to_pop[asn] += pop
+			except KeyError:
+				as_to_pop[asn] = pop
+
+		n_sites_by_provider = {}
+		for pop,provider in self.ae.provider_popps:
+			try:
+				n_sites_by_provider[provider] += 1
+			except KeyError:
+				n_sites_by_provider[provider] = 1
+		single_site_providers = {}
+		single_site_provider_cc = {}
+		for asn,n in n_sites_by_provider.items():
+			if n == 1:
+				print("Provider {} only connects at 1 site".format(asn))
+				single_site_providers[asn] = None
+				# for cust_asn in self.get_cc(self.parse_asn(asn)):
+				for cust_asn in new_customer_cone.get(self.parse_asn(asn), []):
+					single_site_provider_cc[cust_asn] = None
+		n_sites_by_provider = list(n_sites_by_provider.values())
+
+		print("Providers: {}, number of sites by provider\nMedian: {}, Low: {}, High: {}".format(
+			len(n_sites_by_provider), np.median(n_sites_by_provider), np.min(n_sites_by_provider), np.max(n_sites_by_provider)))
+
+		### What percent of ASNs ingress through a provider that's only at a single site?
+		## assume they ingress if they are in the customer cone of that provider, to get an upper bound
+		self.ae.check_load_probable_address_source_data()
+		single_site_dsts, single_site_asns, all_asns = {}, {}, {}
+		for dst in tqdm.tqmd(self.ae.all_client_addresses_from_msft, desc="assessing dst membership..."):
+			if self.parse_asn(dst) is None: continue
+			all_asns[self.parse_asn(dst)] = None
+			try:
+				single_site_provider_cc[self.parse_asn(dst)]
+			except KeyError:
+				continue
+			single_site_dsts[dst] = None
+			single_site_asns[self.parse_asn(dst)] = None
+		print("{} single site provider dsts out of {}".format(len(single_site_dsts), len(self.ae.all_client_addresses_from_msft)))
+		print("{} single site provider ASNs out of {}".format(len(single_site_asns), len(all_asns)))
+		single_site_volume = sum(as_to_pop.get(asn,0) for asn in single_site_asns)
+		all_volume = sum(as_to_pop.get(asn,0) for asn in all_asns)
+		single_site_asns_list = list(single_site_asns)
+		vols = {asn: as_to_pop.get(asn,0) for asn in single_site_asns_list}
+		x = sorted(single_site_asns_list, key = lambda el : -1 * vols[el])
+		print([(asn,round(100*vols[asn]/all_volume,2)) for asn in x[0:10]])
+
+		print("single site ASNs comprise {} pct. of all volume".format(round(single_site_volume * 100.0 / all_volume)))
+
+		### What percent of ASNs ingress through a peer that's only at a single site?
+		n_sites_by_peer = {}
+		for pop,peer in self.ae.popps:
+			if (pop,peer) in self.ae.provider_popps: continue
+			try:
+				n_sites_by_peer[peer] += 1
+			except KeyError:
+				n_sites_by_peer[peer] = 1
+		single_site_peers = {}
+		single_site_peer_cc = {}
+		for asn,n in n_sites_by_peer.items():
+			if n == 1:
+				print("Peer {} only connects at 1 site".format(asn))
+				single_site_peers[asn] = None
+				# for cust_asn in self.get_cc(self.parse_asn(asn)):
+				for cust_asn in new_customer_cone.get(self.parse_asn(asn), []):
+					single_site_peer_cc[cust_asn] = None
+		n_sites_by_peer = list(n_sites_by_peer.values())
+		single_site_dsts, single_site_asns, all_asns = {}, {}, {}
+		for dst in tqdm.tqmd(self.ae.all_client_addresses_from_msft, desc="assessing dst membership..."):
+			if self.parse_asn(dst) is None: continue
+			all_asns[self.parse_asn(dst)] = None
+			try:
+				single_site_peer_cc[self.parse_asn(dst)]
+			except KeyError:
+				continue
+			single_site_dsts[dst] = None
+			single_site_asns[self.parse_asn(dst)] = None
+		print("{} single site peer dsts out of {}".format(len(single_site_dsts), len(self.ae.all_client_addresses_from_msft)))
+		print("{} single site peer ASNs out of {}".format(len(single_site_asns), len(all_asns)))
+		single_site_volume = sum(as_to_pop.get(asn,0) for asn in single_site_asns)
+		all_volume = sum(as_to_pop.get(asn,0) for asn in all_asns)
+		single_site_asns_list = list(single_site_asns)
+		vols = {asn: as_to_pop.get(asn,0) for asn in single_site_asns_list}
+		x = sorted(single_site_asns_list, key = lambda el : -1 * vols[el])
+		print([(asn,round(100*vols[asn]/all_volume,2)) for asn in x[0:10]])
+
+		print("single site ASNs comprise {} pct. of all volume".format(round(single_site_volume * 100.0 / all_volume)))
+
 
 	def customer_cone_comparison(self):
 		### Compare number of ASes in ingress peer/provider customer cones for available systems
@@ -191,8 +248,16 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		self.save_fig("number_reachable_ingresses_by_as_comparison.pdf")
 
 	def summarize_need_meas(self, peers):
-		cust_cone = pickle.load(open(os.path.join(CACHE_DIR, 
-			'{}_cust_cone.pkl'.format(self.system)),'rb'))
+		cust_cone = {}
+		for row in open(os.path.join(CACHE_DIR, 'peer_to_clients.csv'),'r'):
+			peer,client = row.strip().split(',')
+			peer = self.parse_asn(peer)
+			client = self.parse_asn(client)
+			try:
+				cust_cone[peer].append(client)
+			except KeyError:
+				cust_cone[peer] = [client]
+
 		with open(os.path.join(CACHE_DIR, 'possible_pref_targets_by_peer.csv'),'w') as f:
 			for peer in peers:
 				all_asns = cust_cone.get(peer,[])
@@ -208,6 +273,18 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 				else:
 					prefs_str = ""
 				f.write("{},{}\n".format(peer, prefs_str))
+
+		for row in open(os.path.join(DATA_DIR, 'known_looking_glasses.txt'), 'r'):
+			try:
+				asn = re.search("\t(\d+)\t", row).group(1)
+				looking_glass = re.search("\:\/\/(.+)", row).group(1)
+			except AttributeError:
+				print('Error parsing {}'.format(row.strip()))
+				continue
+			# if self.parse_asn(asn) in peers:
+			# 	print("ASN {} missing measurements but has looking glass {}".format(asn,looking_glass))
+
+
 		print("Done summarizing need meas")
 
 	def prune_per_ingress_measurements(self):
@@ -278,6 +355,15 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 					f2.write(row)
 
 
+	def check_load_ae(self):
+		try:
+			self.ae
+			return
+		except AttributeError:
+			pass
+		from painter_specific_advertisement_experiments import Painter_Specific_Advertisement_Experiments
+		self.ae = Painter_Specific_Advertisement_Experiments('vultr','measure_prepainter',quickinit=True)
+
 	def characterize_per_ingress_measurements(self):
 		### Look at what we measured to for each ingress, some basic properties
 		by_ingress_fn = os.path.join(CACHE_DIR, '{}_ingress_latencies_by_dst.csv'.format(
@@ -285,25 +371,16 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			
 		res = parse_ingress_latencies_mp(by_ingress_fn)
 		meas_by_popp, meas_by_ip = res['meas_by_popp'], res['meas_by_ip']
-		anycast_latencies = {}
-		anycast_pop = {}
-		n_by_pop = {pop:0 for pop in POP_TO_LOC[self.system]}
-		for row in tqdm.tqdm(open(os.path.join(CACHE_DIR, '{}_anycast_latency.csv'.format(
-			self.system)),'r'),desc='loading anycast latencies'):
-				_,ip,lat,pop = row.strip().split(',')
-				if lat == '-1': continue
-				anycast_latencies[ip] = np.maximum(float(lat) * 1000,1)
-				anycast_pop[ip] = pop
-				n_by_pop[pop] += 1
-		print("Number of clients by PoP:\n{}".format(n_by_pop))
 
-		from advertisement_experiments import Advertisement_Experiments
-		ae = Advertisement_Experiments('vultr','measure_prepainter')
-		all_peers = list(set([popp[1] for popp in ae.popps]))
+
+		self.check_load_ae()
+		all_peers = list(set([popp[1] for popp in self.ae.popps]))
 		meas_peers = list(set([popp[1] for popp in meas_by_popp]))
 
 		print("{} targets, {} ingresses with a measurement, {} peers".format(
 			len(meas_by_ip), len(meas_by_popp), len(set(meas_peers))))
+		# for popp in meas_by_popp:
+		# 	print("Got measurements for {}, types {}".format(popp, self.ae.popps[popp]))
 
 		measured_to_already = [tuple(row.strip().split(',')) for row 
 			in open(os.path.join(CACHE_DIR, 'already_completed_popps.csv'),'r')]
@@ -311,6 +388,14 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		no_meas_peers = get_difference(all_peers, meas_peers)
 		no_meas_peers = get_intersection(no_meas_peers, measured_to_peers)
 		print("{} peers without a measurement".format(len(no_meas_peers)))
+
+		n_understood = 0
+		for peer in no_meas_peers:
+			rels = list(set([rel for pop in self.ae.peer_to_pops[peer] for rel in self.ae.popps[pop,peer]]))
+			if len(rels) == 1 and 'routeserver' in rels:
+				n_understood += 1
+		print("Solely routeserver for {} percent of no meas peers".format(round(100*n_understood/len(no_meas_peers),1)))
+
 		self.summarize_need_meas(no_meas_peers)
 
 		x,cdf_x = get_cdf_xy(list([len(meas_by_popp[popp]) for popp in meas_by_popp]),logx=True)
@@ -326,6 +411,40 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		plt.ylabel("CDF of Targets")
 		plt.grid(True)
 		self.save_fig('{}_n_ingresses_by_target.pdf'.format(self.system))
+
+
+		### Look at difference between 1st and 2nd, and between 1st and third
+		deltas = {'1': [], '2': []}
+		for ug in meas_by_ip:
+			sorted_meas = sorted(meas_by_ip[ug].items(), key = lambda el : el[1])
+			if sorted_meas[0][1] < 1 or len(sorted_meas) < 3: # trivial
+				continue
+			delta_1 = sorted_meas[1][1] - sorted_meas[0][1]
+			delta_2 = sorted_meas[2][1] -  sorted_meas[0][1]
+			deltas['1'].append(delta_1)
+			deltas['2'].append(delta_2)
+		for k in deltas:
+			x,cdf_x = get_cdf_xy(deltas[k])
+			plt.plot(x,cdf_x,label=k)
+		plt.grid(True)
+		plt.legend()
+		plt.xlim([0,50])
+		plt.ylim([0,1])
+		self.save_fig('{}_difference_between_bests_ingresses.pdf'.format(self.system))
+
+
+
+		anycast_latencies = {}
+		anycast_pop = {}
+		n_by_pop = {pop:0 for pop in POP_TO_LOC[self.system]}
+		for row in tqdm.tqdm(open(os.path.join(CACHE_DIR, '{}_anycast_latency.csv'.format(
+			self.system)),'r'),desc='loading anycast latencies'):
+				_,ip,lat,pop = row.strip().split(',')
+				if lat == '-1': continue
+				anycast_latencies[ip] = np.maximum(float(lat) * 1000,1)
+				anycast_pop[ip] = pop
+				n_by_pop[pop] += 1
+		print("Number of clients by PoP:\n{}".format(n_by_pop))
 
 
 		ips_in_both = get_intersection(list(anycast_latencies), list(meas_by_ip))
@@ -508,393 +627,6 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		plt.legend()
 		self.save_fig("jc_me_anycast_comparison.pdf")
 
-	def plot_lat_over_time(self):
-		### high level question : how often do we see cases where a path decision function would be non-trivial?
-
-		## intuitively, if the "best path" is unstable, and the second-best path is close to it,
-		## it could be interesting
-		## most interesting would be cases where the paths have predictable "noises", 
-		## instead of something like random shot noise
-
-
-		## are there enough cases where I could make an interesting decision?
-		## straw-man : assume 10s flows, place each flow on lowest latency path at each point in time,
-		## average/max latency of flow - best possible over time and over dests
-		## for the cases where I could make an interesting decision, is it feasible to estimate that noise?
-
-		np.random.seed(31415)
-		cache_fn = os.path.join(CACHE_DIR, 'jitter_metrics.pkl')
-		from scipy.ndimage import uniform_filter1d
-		N_move_average = 4
-		from sklearn.cluster import Birch
-		import pandas as pd
-
-		def characterize_time_series(lbp,vbp,verb=False):
-			typical_lats_by_popp = {popp: np.median(lats) for popp,lats in lbp.items()}
-			ranked_lbp = sorted(typical_lats_by_popp.items(), key = lambda el : el[1])
-			best_popp, second_best_popp = ranked_lbp[0][0],ranked_lbp[1][0]
-
-			# check for path changes
-			# path changes skew variance estimates
-			# means = cluster
-			# if more than one (n_pts at mean > 10% of n_total_pts): path change
-			has_path_change = False
-			for popp in [best_popp, second_best_popp]:
-				if vbp[popp] > 1:
-					brc = Birch(threshold=4,n_clusters=None)
-					labels = brc.fit_predict(lbp[popp].reshape(-1,1))
-					u,c = np.unique(labels,return_counts=True)
-					total_n = len(lbp[popp])
-					frac = c / total_n
-					if sum(frac > .1 ) > 1:
-						has_path_change = True
-						break
-
-			## check for persistent congestion
-			congested_popps = {}
-			for popp,lats in lbp.items():
-				pdlat = pd.DataFrame(lats)
-				avged_lat = np.array(pdlat.rolling(N_move_average,min_periods=1).median()).flatten()
-				mlat = np.percentile(lats,1) # propagation delay
-				lat_mask = (avged_lat > (mlat + 5)).astype(np.int32)
-				## fill in holes via voting
-				hole_filled_lat_mask = np.zeros(len(lat_mask))
-				for i in range(len(lats)):
-					hole_filled_lat_mask[i] = int(np.round(np.average(lat_mask[np.maximum(0,i-N_move_average):np.maximum(i+1,len(lats))])))
-				## look for blocks of "ones" greater than a certain length
-				congested_blocks, n_congest, congested, was_ever_uncongested = [], 0, False, False
-				# if verb:
-				# 	print("{} {} {}".format(avged_lat, lat_mask, hole_filled_lat_mask))
-				for i, l in enumerate(hole_filled_lat_mask):
-					if l and was_ever_uncongested:
-						n_congest += 1
-						if n_congest == N_move_average:
-							congested = True
-							# start of congestion is N_move_average places ago
-							congest_start = np.maximum(i - N_move_average,0)
-					elif not l:
-						was_ever_uncongested = True
-						if congested:
-							# end of congestion
-							congest_end = i
-							congested_blocks.append((congest_start, congest_end))
-							congested = False
-						n_congest = 0
-				congested_popps[popp] = congested_blocks
-			any_congestion = any(len(blocks) > 0 for popp, blocks in congested_popps.items())
-			return {
-				'best_popp': best_popp,
-				'second_best_popp': second_best_popp,
-				'has_path_change': has_path_change,
-				'has_congestion': any_congestion,
-				'congested_popps': congested_popps,
-			}
-
-		if not os.path.exists(cache_fn):
-			
-
-			
-			mean_lats_by_targ = {}
-
-
-			ret = read_lats_over_time()
-			lats_by_targ = ret['lats_by_targ']
-			i_to_popp = ret['i_to_popp']
-			i_to_targ = ret['i_to_targ']
-
-			cluster = False
-			brc = None
-			avg_over = 3000 # seconds, clustering time
-			loss_by_targ = {}
-			for targ in tqdm.tqdm(lats_by_targ,desc="Post-processing latency data"):
-				n_pts = 0
-				loss_by_targ[targ] = {}
-				mean_lats_by_targ[targ] = 0
-				for popp in lats_by_targ[targ]:
-					if cluster:
-						if brc is None:
-							ts = np.array([el[0] for el in lats_by_targ[targ][popp]])
-							brc = Birch(threshold=avg_over,n_clusters=None)
-							labels = brc.fit_predict(ts.reshape(-1,1))
-						new_lats = {}
-						for t,lat in lats_by_targ[targ][popp]:
-							t_map = brc.subcluster_centers_[np.argmin(np.abs(brc.subcluster_centers_ - t))][0]
-							try:
-								new_lats[t_map].append(lat)
-							except KeyError:
-								new_lats[t_map] = [lat]
-						new_lats_avg = {t_map: np.mean(new_lats[t_map]) for t_map in new_lats}
-						lats_by_targ[targ][popp] = sorted(new_lats_avg.items(), key = lambda el : el[0])
-						loss_by_targ[targ][popp] = [np.maximum(4 - len(new_lats[t_map]),0) for t_map,_ in lats_by_targ[targ][popp]]
-					else:
-						loss_by_targ[targ][popp] = np.zeros((len(lats_by_targ[targ]), ))
-					for t,l in lats_by_targ[targ][popp]:
-						mean_lats_by_targ[targ] += l
-						n_pts += 1
-
-					## reject outliers (temporary spikes)
-					lats = np.array(lats_by_targ[targ][popp])[:,1]
-					mlat = np.median(lats)
-					devlat = np.sqrt(np.var(lats))
-					rmvs = (lats > (mlat + 11 * devlat))
-					notboring = False
-					needs_plugging = np.where(rmvs)[0]
-					# if len(needs_plugging) > 0:
-					# 	plt.plot(lats)
-					# 	plt.savefig('figures/tmp{}.pdf'.format(targ))
-					# 	plt.clf()
-					# 	plt.close()
-					for rmv in needs_plugging:
-						lats_by_targ[targ][popp][rmv] = list(lats_by_targ[targ][popp][rmv])
-						if rmv == 0:
-							lats_by_targ[targ][popp][rmv][1] = lats[rmv+1]
-						elif rmv == len(lats) - 1:
-							lats_by_targ[targ][popp][rmv][1] = lats[rmv-1]
-						else:
-							lats_by_targ[targ][popp][rmv][1] = np.mean([lats[rmv-1],lats[rmv+1]])
-						lats_by_targ[targ][popp][rmv] = tuple(lats_by_targ[targ][popp][rmv])
-
-				mean_lats_by_targ[targ] = mean_lats_by_targ[targ] / n_pts
-			for targ in list(lats_by_targ):
-				if len(lats_by_targ[targ]) == 1:
-					del lats_by_targ[targ]
-					del mean_lats_by_targ[targ]
-					del loss_by_targ[targ]
-				
-
-			pickle.dump([mean_lats_by_targ, lats_by_targ, loss_by_targ, i_to_popp, i_to_targ], open(cache_fn,'wb'))
-		else:
-			mean_lats_by_targ, lats_by_targ, loss_by_targ, i_to_popp, i_to_targ = pickle.load(open(cache_fn,'rb'))
-			pass
-		targs = list(lats_by_targ)
-		np.random.shuffle(targs)
-
-		## straw man
-		popps = list(set(popp for targ in lats_by_targ for popp in lats_by_targ[targ]))
-		cols = ['red','black','royalblue','magenta','darkorange','forestgreen','tan']
-		popp_to_col = {popp:c for popp,c in zip(popps,cols)}
-
-		popp_to_ind = {popp:i for i,popp in enumerate(popps)}
-
-
-		# interesting_targs = [targ for targ,perfs in assessed_delta_perfs.items() if any(p > 15 for p in perfs)]
-		interesting_targs = []
-		for targ in tqdm.tqdm(lats_by_targ,desc="Identifying interesting targets to plot."):
-			lats_by_popp = {popp: np.array([el[1] for el in lats_by_targ[targ][popp]]) for popp in lats_by_targ[targ]}
-			var_by_popp = {popp: np.var(lats_by_popp[popp]) for popp in lats_by_popp}
-			ret = characterize_time_series(lats_by_popp, var_by_popp)
-			if ret['has_congestion']:
-				if len(ret['congested_popps'][ret['best_popp']]) > 0:
-					interesting_targs.append((targ,ret))
-
-		plt.rcParams["figure.figsize"] = (40,90)
-		nrows,ncols = 25,8
-		plt_every = 1
-		f,ax = plt.subplots(nrows,ncols)
-		for targi, (targ,ret) in enumerate(sorted(interesting_targs)[0:200]):
-			axrow = targi // ncols
-			axcol = targi % ncols
-			ax2 = ax[axrow,axcol].twinx()
-			for popp in sorted(lats_by_targ[targ]):
-				measx = np.array([el[0] for el in lats_by_targ[targ][popp]])
-				measx = measx - measx[0]
-				measy = np.array([el[1] for el in lats_by_targ[targ][popp]])
-				if len(ret['congested_popps'][popp]) > 0:
-					cbstr = "--".join(["{}-{}".format(int(measx[el[0]]),
-						int(measx[el[1]])) for el in ret['congested_popps'][popp]])
-					lab = "{}-{}".format(i_to_popp[popp],cbstr)
-				else:
-					lab = i_to_popp[popp]
-				ax[axrow,axcol].plot(measx[::plt_every],measy[::plt_every],label=lab,color=popp_to_col[popp])
-
-				lossy = loss_by_targ[targ][popp]
-				ax2.scatter(measx,lossy,color=popp_to_col[popp])
-			ax2.set_ylim([0,4])
-			# ax[axrow,axcol].set_ylim([10,300])
-			ax[axrow,axcol].set_title(i_to_targ[targ])
-			ax[axrow,axcol].legend(fontsize=5)
-		plt.savefig('figures/latency_over_time_interesting_targs.pdf')
-		plt.clf(); plt.close()
-
-
-
-
-
-		# assessed_delta_perfs = {}
-
-		# all_delta_perfs = [el for targ in assessed_delta_perfs for el in assessed_delta_perfs[targ]]
-		# max_by_targ = [np.max(perfs) for targ,perfs in assessed_delta_perfs.items()]
-		# med_by_targ = [np.median(perfs) for targ,perfs in assessed_delta_perfs.items()]
-
-		# ## q: fraction of time we are within X ms of the best?
-		# fracs_within_best = {nms: [sum(1 for p in perfs if p > nms)/len(perfs) for targ,perfs in assessed_delta_perfs.items()] \
-		# 	for nms in [1,3,5,10,15,50,100]}
-
-		# inter_decision_t = 75 # seconds
-		# for targ in tqdm.tqdm(lats_by_targ,desc="Assessing strawman"):
-		# 	boring = True
-		# 	best_overall = None
-		# 	range_by_popp = {}
-		# 	for popp in lats_by_targ[targ]:
-		# 		lat_vals = list([lat for t,lat in lats_by_targ[targ][popp]])
-		# 		range_by_popp[popp] = {
-		# 			'min': np.min(lat_vals),
-		# 			'max': np.max(lat_vals)
-		# 		}
-		# 		if best_overall is None:
-		# 			best_overall = popp
-		# 		elif range_by_popp[best_overall]['min'] > range_by_popp[popp]['min']:
-		# 			best_overall = popp
-		# 	for poppi in lats_by_targ[targ]:
-		# 		if poppi == best_overall: continue
-		# 		if range_by_popp[best_overall]['max'] > range_by_popp[poppi]['min'] + 5:
-		# 			boring = False
-		# 			break
-
-		# 	all_meas = []
-		# 	for popp,vals in lats_by_targ[targ].items():
-		# 		for v in vals:
-		# 			all_meas.append((popp,v))
-		# 	sorted_meas = [(popp_to_ind[popp],t,lat) for popp, (t,lat) in sorted(all_meas, 
-		# 		key = lambda el : el[1][0])]
-		# 	t_start = sorted_meas[0][1]
-		# 	curr_popp_lats = np.zeros((6))
-		# 	t_last_decision = None
-		# 	curr_popp_decision = None
-		# 	delta_perfs = []
-		# 	for popp,t,lat in sorted_meas:
-		# 		curr_popp_lats[popp] = lat
-		# 		if t - t_start > 60:
-		# 			## start making decisions
-		# 			best_popp = np.argmin(curr_popp_lats)
-		# 			if t_last_decision is None:
-		# 				curr_popp_decision = best_popp
-		# 				t_last_decision = t
-		# 			elif t - t_last_decision > inter_decision_t:
-		# 				curr_popp_decision = best_popp
-		# 				t_last_decision = t
-
-		# 			delta_perf = curr_popp_lats[curr_popp_decision] - curr_popp_lats[best_popp]
-		# 			delta_perfs.append((t,delta_perf))
-
-		# 			# if not boring:
-		# 			# 	print("{} {} {} {}".format(best_popp, curr_popp_lats[best_popp], curr_popp_decision,
-		# 			# 		curr_popp_lats[curr_popp_decision]))
-
-		# 	delta_perfs = np.array(delta_perfs)
-		# 	ts,te = delta_perfs[0][0], delta_perfs[-1][0]
-		# 	ns_period = 1.3 # how often we assess performance
-		# 	n_periods = int(np.ceil((te-ts)/ns_period))
-		# 	assessed_delta_perfs[targ] = []
-		# 	for i in range(n_periods):
-		# 		tnow = ts + ns_period * i
-		# 		instancei = np.where(delta_perfs[:,0] - tnow >= 0 )[0][0]
-		# 		delta_perf_now = delta_perfs[instancei,1]
-		# 		assessed_delta_perfs[targ].append(delta_perf_now)
-				
-			
-
-			# if not boring:
-			# 	print("Best overall is {}".format(best_overall))
-			# 	print(np.sum(delta_perfs[:,1]))
-			# 	f,ax = plt.subplots(1)
-			# 	for popp in lats_by_targ[targ]:
-			# 		measx = np.array([el[0] for el in lats_by_targ[targ][popp]])
-			# 		measx = measx - measx[0]
-			# 		measy = np.array([el[1] for el in lats_by_targ[targ][popp]])
-			# 		ax.plot(measx,measy,label=popp)
-			# 	ax.legend()
-			# 	plt.savefig('figures/tmptarglatovertime.pdf')
-			# 	plt.clf(); plt.close()
-			# 	exit(0)
-
-
-		plt.rcParams["figure.figsize"] = (5,10)
-		f,ax = plt.subplots(2)
-		for arr,lab in zip([all_delta_perfs, max_by_targ,med_by_targ], ['all','max','median']):
-			x,cdf_x = get_cdf_xy(arr)
-			ax[0].plot(x,cdf_x,label=lab)
-		for nms in fracs_within_best:
-			x,cdf_x = get_cdf_xy(list(fracs_within_best[nms]))
-			ax[1].plot(x,cdf_x,label="{} ms".format(nms))
-		ax[0].legend()
-		ax[1].legend()
-		ax[0].grid(True)
-		ax[1].grid(True)
-		ax[0].set_xlabel('Achieved - Optimal (ms)')
-		ax[0].set_ylabel('CDF of Targets/Time-Targets')
-		ax[0].set_xlim([0,50])
-		ax[1].set_xlabel('Fraction of Time Performance Requirement Not Met')
-		ax[1].set_ylabel('CDF of Targets')
-		ax[1].set_xlim([0,1])
-		ax[1].set_ylim([0,1])
-		plt.savefig('figures/deltaperfs-strawman.pdf')
-		plt.clf(); plt.close()
-
-
-
-		# 1. for best and second best mean/median latency path, plot mu_1/mu_2 and sigma_1 / sigma_2
-		# 2. for mu_1 - mu_2 vs mu_1 - best_overall_measured (when one path degrades, does the 2nd best degrade)
-		metrics = {
-			'compare_two': {'x':[], 'y': []}, 
-			'degrade_corr': {'x': [], 'y': []}
-		}
-
-		metrics_by_targ = {}
-		for targ in lats_by_targ:
-			if len(lats_by_targ[targ]) < 2 : continue
-			lats_by_popp = {popp: np.array([el[1] for el in lats_by_targ[targ][popp]]) for popp in lats_by_targ[targ]}
-			var_by_popp = {popp: np.var(lats_by_popp[popp]) for popp in lats_by_popp}
-			if np.min(list(var_by_popp.values())) > 10:
-				continue
-			
-			ret = check_path_change(lats_by_popp, var_by_popp)
-			best_popp, second_best_popp, has_path_change = ret['best_popp'], ret['second_best_popp'], ret['has_path_change']
-
-			if has_path_change: continue
-
-			mean_1, mean_2 = np.mean(lats_by_popp[best_popp]), np.mean(lats_by_popp[second_best_popp])
-			var_1, var_2 = var_by_popp[best_popp], var_by_popp[second_best_popp]
-			best_overall = np.min(list(el for popp,els in lats_by_popp.items() for el in els))
-
-			metrics['compare_two']['x'].append(mean_1 - mean_2)
-			metrics['compare_two']['y'].append(var_1 - var_2)
-			metrics['degrade_corr']['x'].append(mean_1 - mean_2)
-			metrics['degrade_corr']['y'].append(mean_1 - best_overall)
-
-			metrics_by_targ[targ] = {'compare_two': (mean_1 - mean_2, var_1 - var_2),
-			'degrade_corr': (mean_1 - mean_2, mean_1 - best_overall)}
-
-		f,ax = plt.subplots(2)
-		for i, (mtrc, lab,xl,yl) in enumerate(zip(['compare_two', 'degrade_corr'], 
-			['Compare', 'Degradation'], ['mu1 - mu2','mu1 - mu2'], ['var1 - var2','mu1 - prop'])):
-			ax[i].scatter(metrics[mtrc]['x'], metrics[mtrc]['y'])
-			ax[i].set_title(lab)
-			ax[i].set_xlabel(xl)
-			ax[i].set_ylabel(yl)
-		ax[1].set_ylim([-10,100])
-		ax[0].set_xlim([-50,50])
-		ax[0].set_ylim([-10,10])
-		ax[1].set_xlim([-50,50])
-		plt.savefig('figures/jitter_metrics_investigation.pdf')
-		plt.clf(); plt.close()
-
-
-		# sorted_targs = sorted(metrics_by_targ.items(), 
-		# 	key = lambda el : -1 * np.abs(el[1]['compare_two'][0] * el[1]['compare_two'][1]))
-		# plt.rcParams["figure.figsize"] = (20,60)
-		# nrows,ncols = 25,4
-		# f,ax = plt.subplots(nrows,ncols)
-		# for targi, (targ,ml) in enumerate(sorted_targs[0:100]):
-		# 	axrow = targi // ncols
-		# 	axcol = targi % ncols
-		# 	for popp in lats_by_targ[targ]:
-		# 		measx = np.array([el[0] for el in lats_by_targ[targ][popp]])
-		# 		measx = measx - measx[0]
-		# 		measy = np.array([el[1] for el in lats_by_targ[targ][popp]])
-		# 		ax[axrow,axcol].plot(measx,measy)
-		# plt.savefig('figures/latency_over_time_random_targs.pdf')
-		# plt.clf(); plt.close()
 
 	def user_prefix_impact(self):
 		perfs = {
@@ -932,87 +664,6 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		plt.xlim([0,300])
 		plt.ylim([0,1])
 		plt.savefig('figures/with_without_users_anycast_performance.pdf')
-
-	def get_probing_targets(self):
-		import pytricia
-		probe_target_fn = os.path.join(CACHE_DIR , 'interesting_targets_to_probe.csv')
-		user_pref_tri = pytricia.PyTricia()
-		for row in open(os.path.join(CACHE_DIR, 'yunfan_prefixes_with_users.csv')):
-			if row.strip() == 'prefix': continue
-			user_pref_tri[row.strip()] = None
-		print("Loaded {} yunfan prefixes".format(len(user_pref_tri)))
-		targs_in_user_prefs = {}
-
-		pops_of_interest = ['newyork','toronto','atlanta']
-		provider_popps = []
-		n_each_pop = 2
-		pop_ctr = {pop:0 for pop in pops_of_interest}
-		for row in open(os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system))):
-			pop,peer = row.strip().split(',')
-			if pop not in pops_of_interest:
-				continue
-			if pop_ctr[pop] == n_each_pop:
-				continue
-			pop_ctr[pop] += 1
-			provider_popps.append((pop,peer))
-		print(provider_popps)
-
-		# ignore the clouds
-		ignore_ases = [self.parse_asn(asn) for asn in [699,8075,15169,792,37963,36351]]
-
-		anycast_latencies = parse_anycast_latency_file(os.path.join(CACHE_DIR, '{}_anycast_latency_withoutrpki.csv'.format(self.system)))
-		print("Loaded {} anycast latencies".format(len(anycast_latencies)))
-		n_valid_latency = 0
-		all_asns = {}
-		self.lookup_asns_if_needed(list(set([ip32_to_24(ip) for ip,pop in anycast_latencies])))
-		for (ip,pop), lats in anycast_latencies.items():
-			parent_pref = user_pref_tri.get_key(ip)
-			lat = np.min(lats)
-			if lat < 2 or lat > 2000: continue
-			n_valid_latency += 1
-
-			ip_asn = self.parse_asn(ip)
-			all_asns[ip_asn] = None
-
-			if parent_pref is not None:
-				parent_key = self.parse_asn(parent_pref)
-				if parent_key in ignore_ases: continue
-				try:
-					targs_in_user_prefs[parent_key].append((ip,float(lat)*1000))
-				except KeyError:
-					targs_in_user_prefs[parent_key] = [(ip,float(lat)*1000)]
-		print("{} targets with valid latency, {} ASNs".format(n_valid_latency, len(all_asns)))
-		print("There are {} ASNs with pingable targets matching our criteria".format(len(targs_in_user_prefs)))
-		used_prefs = {}
-		with open(probe_target_fn,'w') as f:
-			popps = list(provider_popps)
-			popps = [str(popp[0]) + "|" + str(popp[1]) for popp in popps]
-			popps_str = "-".join(popps)
-			for parent_asn, targslats in targs_in_user_prefs.items():
-				sorted_targs = sorted(targslats, key = lambda el : np.abs(el[1]-20))
-				for t,l in sorted_targs[0:40]:
-					parent_pref = user_pref_tri.get_key(t)
-					try:
-						used_prefs[parent_pref]
-						continue
-					except KeyError:
-						used_prefs[parent_pref] = None
-					# org = self.org_to_as.get(parent_asn, [parent_asn])[0]
-					# f.write("{},{},{}\n".format(org,t,l))
-					f.write("{},{}\n".format(t,popps_str))
-
-		# interesting_prefs = list(targs_in_user_prefs)
-		# self.lookup_asns_if_needed(interesting_prefs)
-		# asn_ct = {}
-		# for pref in interesting_prefs:
-		# 	asn = self.parse_asn(pref)
-		# 	if asn is not None:
-		# 		try:
-		# 			asn_ct[asn] += 1
-		# 		except KeyError:
-		# 			asn_ct[asn] = 1
-		# for asn,ct in sorted(asn_ct.items(), key = lambda el : -1 * el[1]):
-		# 	print("{} {} {}".format(asn,self.org_to_as.get(asn,[asn]),ct))
 
 	def unicast_anycast_withdrawal_experiment(self):
 		plot_cache_fn = os.path.join(CACHE_DIR, 'anycast_unicast_withdrawal_quickplotcache.pkl')
@@ -1141,8 +792,10 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		those_lats['anycastpost'] = anycast_path_post
 
 		self.plot_withdrawal_time_series(those_lats, ris_updates, blackhole_time)
-		for plotnumi in range(6):
+		for plotnumi in range(8):
 			self.plot_withdrawal_time_series_for_ppt(those_lats, ris_updates, blackhole_time, blackhole_time_i, plotnumi)
+		for plotnumi in range(9):
+			self.plot_withdrawal_time_series_for_job_talk(those_lats, ris_updates, blackhole_time, blackhole_time_i, plotnumi)
 
 	def plot_withdrawal_time_series(self, latency_over_time, ris_updates,
 			blackhole_time):
@@ -1320,14 +973,17 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		max_y = 95
 		rng=[blackhole_time - 60, blackhole_time + 100]
 		this_blackhole = [t for t in blackhole_times if t>=rng[0] and t<=rng[1]][0]
-		intf_colors = {intf: ['red','blue','brown','tan','salmon','salmon'][i] for i,intf in enumerate(intfs)}
+		intf_colors = {intf: ['red','blue','brown','tan','orange','orange'][i] for i,intf in enumerate(intfs)}
 		painter_color = 'forestgreen'
-		# latency over time
 		
+		anycast_unavailable_length = 1.2#recover_time - blackhole_time
+		anycast_unstable_length = 30
 		
+		BIG_FS = 32
+
 		ax.set_ylim([0,max_y])
-		ax.set_xlabel("Time (s)")
-		ax.set_ylabel("RTT Latency (ms)")
+		ax.set_xlabel("Time (s)", fontsize=BIG_FS)
+		ax.set_ylabel("RTT Latency (ms)", fontsize=BIG_FS)
 		ax.set_xlim(rng)
 		# set the x labels to be between zero and range length, for presentation purposes
 		labels = [item.get_text() for item in ax.get_xticklabels()]
@@ -1340,8 +996,26 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
 			return
 
-		ax.annotate("Anycast Path", (this_blackhole-55, 27), color='salmon')
-		ax.annotate("PAINTER Advertised\n Paths", (this_blackhole - 55, 57))
+		def ann_painter_single(unstable=True):
+			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+48, 8), c='forestgreen',fontweight='bold',
+				fontsize=BIG_FS)
+			ax.annotate("",xytext=(this_blackhole+50,13),xy=(this_blackhole-5,21),
+				arrowprops=dict(lw=.4,color=painter_color))
+			if unstable:
+				ax.annotate("Anycast\nUnstable", (this_blackhole+1, 13), c='darkorange', 
+					fontweight='bold', rotation=30, fontsize=BIG_FS)
+		def ann_painter_double():
+			ax.annotate("   PAINTER\nPath Choices", (this_blackhole+48, 8), c='forestgreen',fontweight='bold',
+			fontsize=BIG_FS)
+			ax.annotate("",xytext=(this_blackhole+47,13),xy=(this_blackhole-5,21),
+				arrowprops=dict(lw=.4,color=painter_color))
+			ax.annotate("",xytext=(this_blackhole+47,13),xy=(this_blackhole+52,43),
+				arrowprops=dict(lw=.4,color=painter_color))
+			ax.annotate("Anycast\nUnstable", (this_blackhole+1, 13), c='darkorange', 
+				fontweight='bold', rotation=30, fontsize=BIG_FS)
+
+		ax.annotate("Anycast Path", (this_blackhole-55, 29), color='orange', fontsize=BIG_FS)
+		# ax.annotate("PAINTER Advertised\n Paths", (this_blackhole - 55, 57))
 		for intf in intfs:
 			t_arr = latency_over_time[intf][0,:] - start_t
 			lat_arr = latency_over_time[intf][1,:]
@@ -1349,24 +1023,20 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			ax.plot(t_arr[0:blackhole_time_i], lat_arr[0:blackhole_time_i], c=intf_colors[intf])
 
 
-		ax.annotate("  Normal\nOperation", (this_blackhole-50, 73), c='blue',fontweight='bold',
-			rotation=30)
-		anycast_unavailable_length = 1.2#recover_time - blackhole_time
+		ax.annotate("  Normal\nOperation", (this_blackhole-60, 63), c='blue',fontweight='bold',
+			rotation=30, fontsize=BIG_FS)
 		if plotnumi == 1:
-			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
-			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
-				arrowprops=dict(lw=.4,color=painter_color))
+			ann_painter_single(unstable=False)
 			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
 			return
 
 
 		# blackhole events
 		ax.vlines(x=this_blackhole-.3, ymin=0, ymax=max_y, color='k', linestyle='dashed')
-		ax.annotate("   PoP\nFailure", (this_blackhole-10, 84),fontweight='bold', color='white', backgroundcolor='black')
+		ax.annotate("   PoP\nFailure", (this_blackhole-14, 79),fontweight='bold', color='white', backgroundcolor='black',
+			fontsize=BIG_FS)
 		if plotnumi == 2:
-			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
-			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
-				arrowprops=dict(lw=.4,color=painter_color))
+			ann_painter_single(unstable=False)
 			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
 			return
 
@@ -1375,46 +1045,45 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			lat_arr = latency_over_time[intf][1,:]
 			ax.plot(t_arr, lat_arr, c=intf_colors[intf])
 		if plotnumi == 3:
-			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
-			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
-				arrowprops=dict(lw=.4,color=painter_color))
+			ann_painter_single(unstable=False)
 			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
 			return
 		
 
 		ax.vlines(x=this_blackhole+anycast_unavailable_length,ymin=0, ymax=max_y, color='r', linestyle='dashed')
 		ax.annotate("Unavailable\n Using Anycast", (this_blackhole+4, 58), c='r', 
-			fontweight='bold', rotation=30)
+			fontweight='bold', rotation=30,fontsize=BIG_FS)
 		ax.annotate("",xytext=(this_blackhole+6,62),xy=(this_blackhole+.5,58),
 			arrowprops=dict(lw=.4,color='red'))
 		ax.fill_between(np.linspace(this_blackhole-.3,this_blackhole+anycast_unavailable_length),0,max_y, color='red', alpha=.1)
 		if plotnumi == 4:
-			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
-			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
-				arrowprops=dict(lw=.4,color=painter_color))
+			ann_painter_single(unstable=False)
+			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
+			return
+
+
+		ax.vlines(x=this_blackhole+anycast_unstable_length,ymin=0, ymax=max_y, color='darkorange', linestyle='dashed')
+		ax.fill_between(np.linspace(this_blackhole+anycast_unavailable_length,this_blackhole+anycast_unstable_length),0,
+			max_y, color='orange', alpha=.1)
+		if plotnumi == 5:
+			ann_painter_single()
 			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
 			return
 
 
 		ax.vlines(x=this_blackhole+60, ymin=0, ymax=max_y, color='y', linestyle='dashed')
-		ax.annotate("Unavailable\n Using DNS", (this_blackhole+28, 55), c='y', fontweight='bold',
-		rotation=30)
+		ax.annotate("Unavailable\n Using DNS", (this_blackhole+28, 53), c='y', fontweight='bold',
+		rotation=30, fontsize=BIG_FS)
 		# ax.annotate("Network\nBlackhole", (this_blackhole+1, 50),fontweight='bold')
 		# ax.annotate("PAINTER\nPath Choice", (this_blackhole+1, 295), c='forestgreen',fontweight='bold')
 		ax.fill_between(np.linspace(this_blackhole+anycast_unavailable_length,this_blackhole+60),0,max_y, color='yellow', alpha=.1)
-		if plotnumi == 5:
-			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
-			ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
-				arrowprops=dict(lw=.4,color=painter_color))
+		if plotnumi == 6:
+			ann_painter_single()
 			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
 			return
 		
 
-		ax.annotate("   PAINTER\nPath Choices", (this_blackhole+61, 8), c='forestgreen',fontweight='bold')
-		ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole-5,21),
-			arrowprops=dict(lw=.4,color=painter_color))
-		ax.annotate("",xytext=(this_blackhole+60,13),xy=(this_blackhole+55,43),
-			arrowprops=dict(lw=.4,color=painter_color))
+		ann_painter_double()
 		# highlight chosen path
 		for i in range(len(chosen_path_times) - 1):
 			this_t = chosen_path_times[i][0] - start_t
@@ -1430,8 +1099,170 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			t_arr = t_arr[inds]
 			ax.plot(t_arr,lat_arr,color=painter_color,linewidth=10,alpha=.4)
 			# ax.plot(t_arr,lat_arr,color=intf_colors[intf],linewidth=10,alpha=.4)
-		if plotnumi == 6:
+		if plotnumi == 7:
 			self.save_fig("system_demonstration_time_series_for_ppt_{}.png".format(plotnumi))
+			return
+
+	def plot_withdrawal_time_series_for_job_talk(self, latency_over_time, ris_updates,
+			blackhole_time, blackhole_time_i, plotnumi):
+		## Time series showing path selection and path latencies
+		start_t = 0
+		blackhole_times = [blackhole_time]
+		chosen_path_times = [(0,'optimal'),(blackhole_time-.2,'suboptimal'),(blackhole_time+1000,'suboptimal')]
+		intf_to_label = { # TODO
+			"184.164.238.1": "Unicast Path",
+			"anycastpre": "Anycast Path",
+			"anycastpost": "Anycast Path",
+			"184.164.240.1": "Alternate Path 1",
+			"184.164.242.1": "Alternate Path 2",
+			"184.164.243.1": "Alternate Path 3",
+		}
+		name_intf_mapping = {
+			'optimal': '184.164.238.1',
+			'suboptimal': '184.164.240.1',
+		}
+		intfs = sorted(list(intf_to_label))
+		f,ax = self.get_figure(fs=21,fw=13)
+		max_y = 95
+		rng=[blackhole_time - 60, blackhole_time + 100]
+		this_blackhole = [t for t in blackhole_times if t>=rng[0] and t<=rng[1]][0]
+		intf_colors = {intf: ['red','blue','brown','tan','orange','orange'][i] for i,intf in enumerate(intfs)}
+		painter_color = 'forestgreen'
+		
+		anycast_unavailable_length = 1.2#recover_time - blackhole_time
+		anycast_unstable_length = 30
+		
+		BIG_FS = 32
+
+		ax.set_ylim([0,max_y])
+		ax.set_xlabel("Time (s)", fontsize=BIG_FS)
+		ax.set_ylabel("RTT Latency (ms)", fontsize=BIG_FS)
+		ax.set_xlim(rng)
+		# set the x labels to be between zero and range length, for presentation purposes
+		labels = [item.get_text() for item in ax.get_xticklabels()]
+		n_labels = len(labels)
+		dlta = (rng[1] - rng[0]) * 1.0 / n_labels
+		for i in range(n_labels):
+			labels[i] = round(dlta * i)
+		ax.set_xticklabels(labels)
+		if plotnumi == 0:
+			self.save_fig("system_demonstration_time_series_for_job_talk_{}.png".format(plotnumi))
+			return
+
+		def ann_painter_single(unstable=True):
+			ax.annotate("   PAINTER\nPath Choice", (this_blackhole+48, 8), c='forestgreen',fontweight='bold',
+				fontsize=BIG_FS)
+			ax.annotate("",xytext=(this_blackhole+50,13),xy=(this_blackhole-5,21),
+				arrowprops=dict(lw=.4,color=painter_color))
+			if unstable:
+				ax.annotate("Anycast\nUnstable", (this_blackhole+1, 13), c='darkorange', 
+					fontweight='bold', rotation=30, fontsize=BIG_FS)
+		def ann_painter_double():
+			ax.annotate("   PAINTER\nPath Choices", (this_blackhole+48, 8), c='forestgreen',fontweight='bold',
+			fontsize=BIG_FS)
+			ax.annotate("",xytext=(this_blackhole+47,13),xy=(this_blackhole-5,21),
+				arrowprops=dict(lw=.4,color=painter_color))
+			ax.annotate("",xytext=(this_blackhole+47,13),xy=(this_blackhole+52,43),
+				arrowprops=dict(lw=.4,color=painter_color))
+			ax.annotate("Anycast\nUnstable", (this_blackhole+1, 13), c='darkorange', 
+				fontweight='bold', rotation=30, fontsize=BIG_FS)
+
+		ax.annotate("Anycast Path", (this_blackhole-55, 29), color='orange', fontsize=BIG_FS)
+		# ax.annotate("PAINTER Advertised\n Paths", (this_blackhole - 55, 57))
+		for intf in intfs:
+			t_arr = latency_over_time[intf][0,:] - start_t
+			lat_arr = latency_over_time[intf][1,:]
+			if t_arr[0] > blackhole_time -5: continue
+			ax.plot(t_arr[0:blackhole_time_i], lat_arr[0:blackhole_time_i], c=intf_colors[intf])
+
+
+		ax.annotate("  Normal\nOperation", (this_blackhole-60, 63), c='blue',fontweight='bold',
+			rotation=30, fontsize=BIG_FS)
+		
+		if plotnumi == 1:
+			self.save_fig("system_demonstration_time_series_for_job_talk_{}.png".format(plotnumi))
+			return
+
+		# highlight chosen path
+		for i in range(len(chosen_path_times) - 1):
+			this_t = chosen_path_times[i][0] - start_t
+			next_t = chosen_path_times[i+1][0] - start_t
+			this_path = chosen_path_times[i][1]
+			intf = name_intf_mapping[this_path]
+			data_this_path = latency_over_time[intf]
+			t_arr = data_this_path[0,:] -  start_t
+			inds = [i for i,_t in enumerate(t_arr) if _t > this_t and _t <= next_t]
+			if inds == []: continue
+			# inds = inds + [max(inds) + 1]
+			lat_arr = data_this_path[1,inds]
+			t_arr = t_arr[inds]
+			ax.plot(t_arr,lat_arr,color=painter_color,linewidth=10,alpha=.4)
+			break
+
+		if plotnumi == 2:
+			ann_painter_single(unstable=False)
+			self.save_fig("system_demonstration_time_series_for_job_talk_{}.png".format(plotnumi))
+			return
+
+
+		# blackhole events
+		ax.vlines(x=this_blackhole-.3, ymin=0, ymax=max_y, color='k', linestyle='dashed')
+		ax.annotate("   Site\nFailure", (this_blackhole-14, 79),fontweight='bold', color='white', backgroundcolor='black',
+			fontsize=BIG_FS)
+		if plotnumi == 3:
+			ann_painter_single(unstable=False)
+			self.save_fig("system_demonstration_time_series_for_job_talk_{}.png".format(plotnumi))
+			return
+
+		for intf in intfs:
+			t_arr = latency_over_time[intf][0,:] - start_t
+			lat_arr = latency_over_time[intf][1,:]
+			ax.plot(t_arr, lat_arr, c=intf_colors[intf])
+		if plotnumi == 4:
+			ann_painter_single(unstable=False)
+			self.save_fig("system_demonstration_time_series_for_job_talk_{}.png".format(plotnumi))
+			return
+		
+
+		ax.vlines(x=this_blackhole+anycast_unavailable_length,ymin=0, ymax=max_y, color='r', linestyle='dashed')
+		ax.annotate("Unavailable\n Using Anycast", (this_blackhole+4, 58), c='r', 
+			fontweight='bold', rotation=30,fontsize=BIG_FS)
+		ax.annotate("",xytext=(this_blackhole+6,62),xy=(this_blackhole+.5,58),
+			arrowprops=dict(lw=.4,color='red'))
+		ax.fill_between(np.linspace(this_blackhole-.3,this_blackhole+anycast_unavailable_length),0,max_y, color='red', alpha=.1)
+		if plotnumi == 5:
+			ann_painter_single(unstable=False)
+			self.save_fig("system_demonstration_time_series_for_job_talk_{}.png".format(plotnumi))
+			return
+
+
+		ax.vlines(x=this_blackhole+anycast_unstable_length,ymin=0, ymax=max_y, color='darkorange', linestyle='dashed')
+		ax.fill_between(np.linspace(this_blackhole+anycast_unavailable_length,this_blackhole+anycast_unstable_length),0,
+			max_y, color='orange', alpha=.1)
+		if plotnumi == 6:
+			ann_painter_single()
+			self.save_fig("system_demonstration_time_series_for_job_talk_{}.png".format(plotnumi))
+			return
+		
+
+		ann_painter_double()
+		# highlight chosen path
+		for i in range(len(chosen_path_times) - 1):
+			this_t = chosen_path_times[i][0] - start_t
+			next_t = chosen_path_times[i+1][0] - start_t
+			this_path = chosen_path_times[i][1]
+			intf = name_intf_mapping[this_path]
+			data_this_path = latency_over_time[intf]
+			t_arr = data_this_path[0,:] -  start_t
+			inds = [i for i,_t in enumerate(t_arr) if _t > this_t and _t <= next_t]
+			if inds == []: continue
+			# inds = inds + [max(inds) + 1]
+			lat_arr = data_this_path[1,inds]
+			t_arr = t_arr[inds]
+			ax.plot(t_arr,lat_arr,color=painter_color,linewidth=10,alpha=.4)
+			# ax.plot(t_arr,lat_arr,color=intf_colors[intf],linewidth=10,alpha=.4)
+		if plotnumi == 7:
+			self.save_fig("system_demonstration_time_series_for_job_talk_{}.png".format(plotnumi))
 			return
 
 	def save_fig(self, fig_file_name):
@@ -1497,8 +1328,9 @@ if __name__ == "__main__":
 	# ma.get_probing_targets()
 	# ma.user_prefix_impact()
 	# ma.get_probing_targets()
-	# ma.plot_lat_over_time()
+	ma.plot_lat_over_time()
 	# ma.characterize_per_ingress_measurements()
 	# ma.prune_per_ingress_measurements()
 	# ma.find_targs_unicast_anycast_withdrawal_experiment()
-	ma.unicast_anycast_withdrawal_experiment()
+	# ma.unicast_anycast_withdrawal_experiment()
+	# ma.jiangchen_nsdi_customer_cone_stats()

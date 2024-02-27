@@ -25,6 +25,7 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		if not kwargs.get('childoverride', False):
 			self.run = {
 				'simple_anycast_test': self.simple_anycast_test,
+				'measure_catchment': self.measure_catchment,
 				'measure_anycast': self.check_measure_anycast,
 				'find_needed_pingable_targets': self.find_needed_pingable_targets, # pings everything to see if we can find responsive addresses
 				'latency_over_time_casestudy': self.latency_over_time_casestudy, # measure latency to different targets over long period of time
@@ -37,6 +38,8 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		# IWNR: [('167.62.98.92', 'miami'), ('207.245.53.134', 'mumbai'), ('148.245.66.226', 'atlanta'), 
 		# ('193.109.112.12', 'amsterdam'), ('166.88.191.39', 'mumbai'), ('85.135.22.137', 'mumbai'), ('95.47.58.4', 'frankfurt'), 
 		# ('143.106.212.1', 'mumbai'), ('139.195.194.1', 'singapore'), ('195.234.187.65', 'amsterdam')] 
+
+		"""Function meant for testing anycast latency on a small number of destinations."""
 
 		pops = list(self.pops)
 		n_prefs = len(self.available_prefixes)
@@ -93,6 +96,78 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		# withdraw all prefixes
 		for pref in self.available_prefixes:	
 			self.withdraw_anycast(pref)
+
+	def measure_catchment(self, propagate_time = 120, pop_batch=None, targ_batch=None,
+		**kwargs):
+		"""Measures catchment to pops."""
+		if targ_batch is None:
+			targs = self.get_clients_by_popp('all')
+			np.random.shuffle(targs)
+		else:
+			targs = targ_batch
+		if pop_batch is None:
+			pop_batch = [self.pops]
+
+		out_fn = kwargs.get('out_fn', self.pop_to_clients_fn)
+		print("NOTE -- outputting results to {}".format(out_fn))
+		
+		srcs_set = []
+		prefs_set = []
+		taps_set = []
+		clients_set = []
+		popi = 0
+		for i in range(len(pop_batch)):
+			if not CAREFUL:
+				pref = self.get_most_viable_prefix()
+			else:
+				pref = self.available_prefixes[i]
+			prefs_set.append(pref)
+			srcs_set.append(pref_to_ip(pref))
+			## it doesnt matter what pop we send things out, but just load balance among pops
+			taps_set.append(self.pop_to_intf[self.pops[popi%len(self.pops)]])
+			if targ_batch is None:
+				clients_set.append(targs)
+			else:
+				clients_set.append(targs[i])
+			popi += 1
+
+			## announce to pops
+			self.advertise_to_pops(pop_batch[i], pref)
+			pops_str = "-".join(pop_batch[i])
+			if not CAREFUL:
+				with open(out_fn, 'a') as f:
+					f.write("prefix_to_pop,{},{}\n".format(pref, pops_str))
+
+		print("{} {} {}".format(srcs_set, taps_set, [len(el) for el in clients_set]))
+		if CAREFUL:
+			return
+		print("Waiting for anycast announcement to propagate.")
+		time.sleep(propagate_time)
+		pw = Pinger_Wrapper(self.pops, self.pop_to_intf)
+		pw.n_rounds = 2
+		pw.rate_limit = 1000
+		lats_results = pw.run(srcs_set, taps_set, clients_set)
+
+		for pref in lats_results:
+			pop_results = {}
+			these_lats_results = lats_results[pref]
+			for dst, meas in these_lats_results.items():
+				try:
+					pop_results[dst]
+				except KeyError:
+					pop_results[dst] = []
+				for m in meas:
+					pop_results[dst].append(m.get('endpop', None))
+			for dst in pop_results:	
+				pop_results[dst] = list(set(pop_results[dst]))
+			with open(out_fn, 'a') as f:
+				for dst, end_pops in pop_results.items():
+					for end_pop in end_pops:
+						if end_pop is None: continue
+						f.write("{},{},{}\n".format(pref,dst,end_pop))
+		for pref in prefs_set:
+			self.withdraw_anycast(pref)
+		return pop_results
 
 	def check_measure_anycast(self, targs=None):
 		# self.check_construct_client_to_peer_mapping()
@@ -256,7 +331,7 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		targs = {}
 		popp_ctr = {}
 		for row in open(os.path.join(CACHE_DIR, 'interesting_targets_to_probe.csv'),'r'):
-			ip,popps_str = row.strip().split(',')
+			ip,popps_str,pop = row.strip().split(',')
 			popps = popps_str.split("-")
 			popps = [tuple(el.split("|")) for el in popps]
 			for popp in popps:
@@ -266,15 +341,26 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 					popp_ctr[popp] = 1
 			targs[ip] = None
 		targs = list(targs)
+		
+		## Limit targs randomly, to a number we can manage given our desired probing rate
+		np.random.seed(31415)
+		np.random.shuffle(targs)
+		desired_probing_period = 30 # seconds
+		pps_allowed = 1000
+		n_rounds = 4
+		max_targs_allowed = int(desired_probing_period * pps_allowed / n_rounds)
+		targs = targs[0:max_targs_allowed]
+
 		n_prefs = len(self.available_prefixes)
 		measure_to = [ell[0] for ell in sorted(popp_ctr.items(), key = lambda el : -1 * el[1])[0:n_prefs]]
 		print("Measuring to PoPPs : {}".format(measure_to))
 		popp_lat_fn = os.path.join(CACHE_DIR, "{}_latency_over_time_case_study.csv".format(self.system))
 
 		prefix_popps = [[measure_to[b]] for b in range(len(measure_to))]
-		n_adv_rounds = 1
+		n_adv_rounds = 1 ## Dummy variable
 		pw = Pinger_Wrapper(self.pops, self.pop_to_intf)
-		pw.n_rounds = 4
+		pw.rate_limit = pps_allowed
+		pw.n_rounds = n_rounds
 		
 		n_meas_rounds = 10000
 		measurement_period = 10 # seconds
@@ -443,10 +529,49 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		self.check_measure_anycast(targs = yunfan_targs)
 
 	def test_new_comms(self):
-		pref = self.get_most_viable_prefix()
-		popps = [('newyork','2914'), ('tokyo','13445')]
+		np.random.seed(31415)
+		from generic_measurement_utils import AS_Utils_Wrapper
+		self.utils = AS_Utils_Wrapper()
+		self.utils.check_load_siblings()
+		self.utils.check_load_as_rel()
+		self.utils.update_cc_cache()
+		self.check_construct_client_to_peer_mapping()
+		# prefix_popps = [[('newyork','2914'), ('tokyo','13445'), ('miami', '13984'), ('miami', '13335')]]
+		prefix_popps = [[('miami', '13984'), ('miami', '13335')]]
+		every_client_of_interest = []
+		for adv_set in prefix_popps:
+			this_set_clients = set()
+			for pop,peer in adv_set:
+				asns = self.popp_to_clientasn.get((pop,peer),[])
+				for asn in asns:
+					this_asn_clients = self.asn_to_clients.get(asn,[])
+					this_set_clients = this_set_clients.union(set(this_asn_clients))
+			every_client_of_interest.append(this_set_clients)
+		with open(os.path.join(CACHE_DIR, 'testing_comms_should_have_client.csv'), 'w') as f:
+			for c_set in every_client_of_interest:
+				for c in c_set:
+					f.write("{}\n".format(c))
+		popp_lat_fn = os.path.join(CACHE_DIR, 'testing_comms_lats.csv')
+		# self.conduct_measurements_to_prefix_popps(prefix_popps, every_client_of_interest, 
+		# 	popp_lat_fn, using_manual_clients=True, logcomplete=False)
 
-		self.advertise_to_popps(popps,pref)
+		clients = {}
+		for row in open(popp_lat_fn,'r'):
+			fields = row.strip().split(',')
+			if len(fields) != 6: continue
+			clients[fields[2]] = None
+		found_peers = {}
+		for adv_set in prefix_popps:
+			this_set_clients = set()
+			for pop,peer in adv_set:
+				asns = self.popp_to_clientasn.get((pop,peer),[])
+				# for asn in asns:
+				for asn in [peer]:
+					this_asn_clients = self.asn_to_clients.get(asn,[])
+					if len(get_intersection(this_asn_clients, clients)) > 0:
+						found_peers[peer] = None
+						break
+		print(found_peers)
 
 
 if __name__ == "__main__":
