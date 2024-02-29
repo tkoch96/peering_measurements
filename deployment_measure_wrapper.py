@@ -14,6 +14,7 @@ class Deployment_Measure_Wrapper():
 		self.recalc_probable_clients = False
 
 		self.system = 'vultr'
+		self.max_n_communities = 0
 
 		self.addresses_that_respond_to_ping_fn = os.path.join(DATA_DIR, "addresses_that_respond_to_ping.csv")
 		all_muxes_str = check_output("sudo client/peering openvpn status", shell=True).decode().split('\n')
@@ -128,8 +129,20 @@ class Deployment_Measure_Wrapper():
 				for popp,rels in self.popps.items():
 					if 'provider' in rels:
 						f.write("{},{}\n".format(popp[0],popp[1]))
-			# community_ixps = ['45686','26162','24115']
-			community_ixps = ['63221', '24115', '62499', '6695', '43252', '47228', '56890', '56890', '19996','63221']
+	
+			## 0:IXP, IXP:Peer			
+			self.community_ixps_type_1 = ['6777','63221','24115','62499','6695','43252','47228',
+				'56890','8714','19996','63221','13538','63034','51706','33108','19996',
+				'24115','55518','48793','6895','7606','45686',
+				'11670','52005','24224','7606','59200','61522']
+			## 65000:0, 64960:Peer
+			self.community_ixps_type_2 = ['58941','58942','58943']
+			## 65001:Peer
+			self.community_ixps_type_3 = ['26162']
+			## IXP:0, IXP:Peer
+			self.community_ixps_type_4 = ['49378']
+			community_ixps = self.community_ixps_type_1 + self.community_ixps_type_2 + \
+				self.community_ixps_type_3 + self.community_ixps_type_4
 			self.no_community_ixps = list(set([ixp for pop in self.pop_to_ixps for ixp in self.pop_to_ixps[pop]]))
 			self.no_community_ixps = get_difference(self.no_community_ixps, community_ixps)
 
@@ -183,6 +196,12 @@ class Deployment_Measure_Wrapper():
 			'melbourne':'67.219.104.2',
 			'saopaulo':'216.238.110.148',
 			'johannesburg':'139.84.230.180',
+			'osaka': '64.176.44.110',
+			'santiago': '64.176.14.19',
+			'manchester': '64.176.187.76',
+			'telaviv': '64.176.173.34',
+			'honolulu': '208.83.237.194',
+
 		}}[self.system]
 		self.pops_list = list(self.vpn_ips)
 
@@ -343,8 +362,6 @@ class Deployment_Measure_Wrapper():
 		if len(peers_filtered) == 0:
 			raise ValueError("must be nonzero number of peers")
 
-		print(peers_filtered)
-
 		this_pop_providers = list([peer for _pop,peer in self.popps if 'provider' in self.popps[_pop,peer] and pop == _pop])
 
 		## for peers with more than one connection type at a PoP (which is many of them)
@@ -433,13 +450,39 @@ class Deployment_Measure_Wrapper():
 
 	def ixp_to_limit_str(self, ixp, peers):
 		### All of these are from jiangchen
-		## https://docs.google.com/document/d/1JzZHB68tfte3PX49d-YxY191mgbC2qoNoLxXtuwdue0/edit
+		## https://docs.google.com/document/d/1MWMaPGJV9GalA_AeFMjupsgwhGklAyzZLThtGJRPCt4/edit
+
+		## 0:IXP, IXP:Peer			
+		# self.community_ixps_type_1 = ['6777','63221','24115','62499','6695','43252','47228',
+		# 	'56890','8714','19996','63221','13538','63034','51706','33108','19996',
+		# 	'24115','55518','48793','6895','24224','7606','45686',
+		# 	'11670','52005','24224','7606','59200','61522']
+		# ## 65000:0, 64960:Peer
+		# self.community_ixps_type_2 = ['58941','58942','58943']
+		# ## 65001:Peer
+		# self.community_ixps_type_3 = ['26162']
+		# ## IXP:0, IXP:Peer
+		# self.community_ixps_type_4 = ['49378']
 
 		community_str = ""
-		if ixp in ['63221', '24115', '62499', '6695', '43252', '47228', '56890', '56890', '19996','63221']:
+		if ixp in self.community_ixps_type_1:
+			## 0:IXP, IXP:Peer			
 			community_str += "-c 0,{} ".format(ixp) # no export to any peer
 			for peer in peers:
-				community_str += '-c {},{}'.format(ixp,peer) # override no export to a specific peer
+				community_str += '-c {},{} '.format(ixp,peer) # override no export to a specific peer
+		elif ixp in self.community_ixps_type_2:
+			## 65000:0, 64960:Peer
+			community_str += "-c 65600,0 "
+			for peer in peers:
+				community_str += "-c 64960,{} ".format(peer)
+		elif ixp in self.community_ixps_type_3:
+			## 65001:Peer
+			for peer in peers:
+				community_str += "-c 65001,{} ".format(peer)
+		elif ixp in self.community_ixps_type_4:
+			community_str += "-c {},0 ".format(ixp)
+			for peer in peers:
+				community_str += "-c {},{} ".format(ixp,peer)
 		else:
 			print("WARNING : IXP {} not implemented in ixp_to_limit_str".format(ixp))
 		return community_str
@@ -459,7 +502,9 @@ class Deployment_Measure_Wrapper():
 				pop, self.peer_to_id[pop, peer], pref),careful=CAREFUL, **kwargs)
 		elif self.system == 'vultr':
 			#https://github.com/vultr/vultr-docs/tree/main/faq/as20473-bgp-customer-guide#readme
-			community_str = self.get_communtiy_str_vultr_adv_to_peers(pop, peers)				
+			community_str = self.get_communtiy_str_vultr_adv_to_peers(pop, peers)
+			n_communities = community_str.count('-c')
+			self.max_n_communities = np.maximum(n_communities, self.max_n_communities)
 			self._call("sudo client/peering prefix announce -m vtr{} {} {}".format(
 				pop, community_str, pref),careful=CAREFUL, **kwargs)
 			pass
@@ -1215,6 +1260,8 @@ class Deployment_Measure_Wrapper():
 				pops = list(set([popp[0] for popp in popps])) # pops corresponding to this prefix
 				pops_set[i] = pops
 				adv_set_to_taps[i] = [self.pop_to_intf[pop] for pop in pops]
+			print(self.max_n_communities)
+			continue	
 
 			if using_manual_clients:
 				for pref,adv_set in zip(pref_set, adv_sets):
@@ -1296,7 +1343,7 @@ class Deployment_Measure_Wrapper():
 										print("Client path pop != pop for {}, {} vs {}".format(client_dst,clientpathpop,pop))
 										exit(0)
 										continue
-					exit(0)
+
 				lats_results = pw.run(srcs_set, taps_set, clients_set,
 					remove_bad_meas=False)
 				pickle.dump([lats_results, srcs_set, this_pops_set,clients_set, adv_set_is], open('tmp/tmp.pkl','wb'))
@@ -1343,7 +1390,7 @@ class Deployment_Measure_Wrapper():
 							else:
 								rtts = []
 								for meas in lats_results[src].get(client_dst, []):
-									### For this advertisement, there's only one ingress this client has a valid path to
+									### Make sure startpop is dstpop so we measure an RTT
 									if meas.get('startpop','start') != meas.get('endpop','end'): continue
 									if meas['pop'] != pop or meas['rtt'] is None:
 										continue
@@ -1358,11 +1405,12 @@ class Deployment_Measure_Wrapper():
 			for pref, popps in zip(pref_set, popps_set):
 				for pop in set([popp[0] for popp in popps]):
 					self.withdraw_from_pop(pop, pref)
-			if kwargs.get('logcomplete',True):
-				with open(self.already_completed_popps_fn, 'a') as f:
-					for popps in popps_set:
-						for pop,peer in popps:
-							f.write("{},{}\n".format(pop,peer))
+			if not CAREFUL:
+				if kwargs.get('logcomplete',True):
+					with open(self.already_completed_popps_fn, 'a') as f:
+						for popps in popps_set:
+							for pop,peer in popps:
+								f.write("{},{}\n".format(pop,peer))
 
 	def check_load_pop_to_clients(self):
 		try:

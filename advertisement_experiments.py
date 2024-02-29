@@ -31,7 +31,11 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 				'latency_over_time_casestudy': self.latency_over_time_casestudy, # measure latency to different targets over long period of time
 				'find_yunfan_targets': self.find_yunfan_targets,
 				'test_new_comms': self.test_new_comms,
+				'null': self.null, # noop on run
 			}[mode]
+
+	def null(self):
+		pass
 
 	def simple_anycast_test(self):
 		# dsts = ['8.8.8.8','1.1.1.1','201.191.30.3','189.106.21.13']
@@ -180,8 +184,9 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		still_need_anycast = get_difference(every_client_of_interest, self.anycast_latencies)
 		print("Could get anycast latency for {} pct of addresses".format(
 			len(still_need_anycast) / len(every_client_of_interest) * 100.0))
-		if len(still_need_anycast) / len(every_client_of_interest) > .01:
+		if False:#len(still_need_anycast) / len(every_client_of_interest) > .01:
 			print("GETTING ANYCAST LATENCY!!")
+			self.check_load_pop_to_clients()
 			self.measure_vpn_lats()
 			### First, get anycast pop
 			client_to_pop = {client_ntwrk:pop for pop,ntwrks in self.pop_to_clients.items()\
@@ -529,6 +534,7 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		self.check_measure_anycast(targs = yunfan_targs)
 
 	def test_new_comms(self):
+		#### This test verifies that routes go to a direct IXP peer and a routeserver peer, but not to where we think that they shouldn't
 		np.random.seed(31415)
 		from generic_measurement_utils import AS_Utils_Wrapper
 		self.utils = AS_Utils_Wrapper()
@@ -538,15 +544,40 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		self.check_construct_client_to_peer_mapping()
 		# prefix_popps = [[('newyork','2914'), ('tokyo','13445'), ('miami', '13984'), ('miami', '13335')]]
 		prefix_popps = [[('miami', '13984'), ('miami', '13335')]]
+		shouldnt_work_popps = [[('miami', '1916'), ('miami', '6507'), ('miami','917'), ('miami', '23314')]]
+		
 		every_client_of_interest = []
+		good_clients = set()
+		good_asns = []
 		for adv_set in prefix_popps:
 			this_set_clients = set()
 			for pop,peer in adv_set:
 				asns = self.popp_to_clientasn.get((pop,peer),[])
 				for asn in asns:
+					good_asns.append(asn)
 					this_asn_clients = self.asn_to_clients.get(asn,[])
 					this_set_clients = this_set_clients.union(set(this_asn_clients))
+					good_clients = good_clients.union(set(this_asn_clients))
 			every_client_of_interest.append(this_set_clients)
+		good_asns = list(set(good_asns))
+		
+		bad_clients = set()
+		bad_asns = []
+		for adv_set in shouldnt_work_popps:
+			this_set_clients = set()
+			for pop,peer in adv_set:
+				asns = self.popp_to_clientasn.get((pop,peer),[])
+				for asn in asns:
+					bad_asns.append(asn)
+					this_asn_clients = self.asn_to_clients.get(asn,[])
+					this_set_clients = this_set_clients.union(set(this_asn_clients))
+					bad_clients = bad_clients.union(set(this_asn_clients))
+			every_client_of_interest.append(this_set_clients)
+
+		bad_clients = get_difference(bad_clients,good_clients)
+		print("Intersection between good and bad ASNs is {}".format(len(get_intersection(good_asns, bad_asns))))
+		print("{} bad clients, {} good clients".format(len(bad_clients), len(every_client_of_interest[0])))
+
 		with open(os.path.join(CACHE_DIR, 'testing_comms_should_have_client.csv'), 'w') as f:
 			for c_set in every_client_of_interest:
 				for c in c_set:
@@ -560,13 +591,18 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 			fields = row.strip().split(',')
 			if len(fields) != 6: continue
 			clients[fields[2]] = None
+		if len(get_intersection(bad_clients, clients)) > 0:
+			print("Uh oh, found {} clients that shouldnt be there".format(len(get_intersection(bad_clients, clients))))
+			bad_ones = get_intersection(bad_clients, clients)
+			print(bad_ones)
+			asns = list(set([self.utils.parse_asn(c) for c in bad_ones]))
+			print(asns)
 		found_peers = {}
 		for adv_set in prefix_popps:
 			this_set_clients = set()
 			for pop,peer in adv_set:
 				asns = self.popp_to_clientasn.get((pop,peer),[])
-				# for asn in asns:
-				for asn in [peer]:
+				for asn in asns:
 					this_asn_clients = self.asn_to_clients.get(asn,[])
 					if len(get_intersection(this_asn_clients, clients)) > 0:
 						found_peers[peer] = None

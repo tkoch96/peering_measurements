@@ -20,7 +20,7 @@ customer_out_fn = os.path.join(DATA_DIR, 'vultr_customers.csv')
 pref_to_asn_out_fn = os.path.join(DATA_DIR, 'vultr_network_to_peers.csv')
 cc_out_fn = os.path.join(CACHE_DIR, 'vultr_customer_cone_from_routes.csv')
 
-if False:
+if True:
 	#### Make sure you actually want to parse all the routes, this rewrites the file
 	with open(all_peers_out_fn,'w') as f:
 		f.write('pop,peer,next_hop,type,ixp\n')
