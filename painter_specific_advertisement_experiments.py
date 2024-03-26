@@ -39,7 +39,7 @@ class Painter_Specific_Advertisement_Experiments(Advertisement_Experiments):
 		""" Conducts anycast measurements and per-ingress measurements, for input into a PAINTER calculation."""
 
 		popp_lat_fn = os.path.join(CACHE_DIR, "{}_ingress_latencies_by_dst.csv".format(self.system))
-		meas_by_popp, meas_by_ip = self.load_per_popp_meas(popp_lat_fn)
+		meas_by_popp, meas_by_ip = self.load_per_popp_meas(popp_lat_fn, exclude_providers=True)
 		meas_peers = [popp[1] for popp in meas_by_popp]
 		all_peers = [popp[1] for popp in self.popps]
 

@@ -174,7 +174,7 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		return pop_results
 
 	def check_measure_anycast(self, targs=None):
-		# self.check_construct_client_to_peer_mapping()
+		self.check_construct_client_to_peer_mapping()
 		self.anycast_latencies = self.load_anycast_latencies()
 		if targs is None:
 			every_client_of_interest = self.get_clients_by_popp('all')
@@ -184,7 +184,7 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		still_need_anycast = get_difference(every_client_of_interest, self.anycast_latencies)
 		print("Could get anycast latency for {} pct of addresses".format(
 			len(still_need_anycast) / len(every_client_of_interest) * 100.0))
-		if False:#len(still_need_anycast) / len(every_client_of_interest) > .01:
+		if len(still_need_anycast) / len(every_client_of_interest) > .01:
 			print("GETTING ANYCAST LATENCY!!")
 			self.check_load_pop_to_clients()
 			self.measure_vpn_lats()
@@ -211,7 +211,8 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 				measurement_src_ip = pref_to_ip(pref)
 				pw = Pinger_Wrapper(self.pops, self.pop_to_intf)
 				pw.n_rounds = 2
-				pw.rate_limit = 30000
+				## higher rate limit since we don't care about latency, just catchment
+				pw.rate_limit = 10000 
 
 				pop_results = {}
 				for pop in self.pops:

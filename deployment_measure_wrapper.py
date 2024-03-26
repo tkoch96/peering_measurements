@@ -25,11 +25,12 @@ class Deployment_Measure_Wrapper():
 			for row in all_muxes_str:
 				if row.strip() == '': continue
 				if 'vtr' not in row: continue
-				self.pops.append(row.split(' ')[0][3:])
+				self.pops.append(row.split(' ')[0])
 		self.pops = sorted(self.pops)
 		self.pop_to_intf = {}
+
 		for pop in self.pops:
-			this_mux_str = [mux_str for mux_str in all_muxes_str if "vtr"+pop in mux_str]
+			this_mux_str = [mux_str for mux_str in all_muxes_str if pop in mux_str]
 			assert len(this_mux_str) == 1
 			this_mux_str = this_mux_str[0]
 			self.pop_to_intf[pop] = "tap" + re.search("tap(\d+)", this_mux_str).group(1)
@@ -169,38 +170,38 @@ class Deployment_Measure_Wrapper():
 		if os.path.exists(self.pop_vpn_lats_fn):
 			self.pop_vpn_lats = pickle.load(open(self.pop_vpn_lats_fn,'rb'))
 		self.vpn_ips = {'vultr': {
-			'miami':'149.28.108.63',
-			'atlanta':'144.202.17.174', 
-			'amsterdam':'95.179.176.143',
-			'tokyo':'108.61.180.64' ,
-			'sydney':'149.28.166.89' ,
-			'frankfurt':'45.76.88.182',
-			'seattle':'137.220.39.64' ,
-			'chicago':'149.28.116.32',
-			'paris':'95.179.222.150',
-			'singapore':'139.180.128.6', 
-			'warsaw':'70.34.251.85', 
-			'newyork':'207.148.19.78', 
-			'dallas':'45.32.204.181',
-			'mexico':'216.238.83.87',
-			'toronto':'149.248.53.68',
-			'madrid':'208.85.20.15' ,
-			'stockholm':'70.34.214.25', 
-			'bangalore':'139.84.136.51',
-			'delhi':'139.84.162.121' ,
-			'losangelas':'45.63.56.176',
-			'silicon':'149.28.208.254' ,
-			'london':'45.63.101.157',
-			'mumbai':'65.20.81.121',
-			'seoul':'141.164.58.13',
-			'melbourne':'67.219.104.2',
-			'saopaulo':'216.238.110.148',
-			'johannesburg':'139.84.230.180',
-			'osaka': '64.176.44.110',
-			'santiago': '64.176.14.19',
-			'manchester': '64.176.187.76',
-			'telaviv': '64.176.173.34',
-			'honolulu': '208.83.237.194',
+			'vtrmiami':'149.28.108.63',
+			'vtratlanta':'144.202.17.174', 
+			'vtramsterdam':'95.179.176.143',
+			'vtrtokyo':'108.61.180.64' ,
+			'vtrsydney':'149.28.166.89' ,
+			'vtrfrankfurt':'45.76.88.182',
+			'vtrseattle':'137.220.39.64' ,
+			'vtrchicago':'149.28.116.32',
+			'vtrparis':'95.179.222.150',
+			'vtrsingapore':'139.180.128.6', 
+			'vtrwarsaw':'70.34.251.85', 
+			'vtrnewyork':'207.148.19.78', 
+			'vtrdallas':'45.32.204.181',
+			'vtrmexico':'216.238.83.87',
+			'vtrtoronto':'149.248.53.68',
+			'vtrmadrid':'208.85.20.15' ,
+			'vtrstockholm':'70.34.214.25', 
+			'vtrbangalore':'139.84.136.51',
+			'vtrdelhi':'139.84.162.121' ,
+			'vtrlosangelas':'45.63.56.176',
+			'vtrsilicon':'149.28.208.254' ,
+			'vtrlondon':'45.63.101.157',
+			'vtrmumbai':'65.20.81.121',
+			'vtrseoul':'141.164.58.13',
+			'vtrmelbourne':'67.219.104.2',
+			'vtrsaopaulo':'216.238.110.148',
+			'vtrjohannesburg':'139.84.230.180',
+			'vtrosaka': '64.176.44.110',
+			'vtrsantiago': '64.176.14.19',
+			'vtrmanchester': '64.176.187.76',
+			'vtrtelaviv': '64.176.173.34',
+			'vtrhonolulu': '208.83.237.194',
 
 		}}[self.system]
 		self.pops_list = list(self.vpn_ips)
@@ -489,7 +490,7 @@ class Deployment_Measure_Wrapper():
 
 	def advertise_to_peers(self, pop, peers, pref, **kwargs):
 		## check to make sure we're not advertising already
-		cmd_out = self._check_output("sudo client/peering bgp adv vtr{}".format(pop),careful=CAREFUL)
+		cmd_out = self._check_output("sudo client/peering bgp adv {}".format(pop),careful=CAREFUL)
 		if cmd_out is not None:
 			if pref in cmd_out.decode():
 				print("WARNING ---- ALREADY ADVERTISING {} TO {}".format(pref, pop))
@@ -505,7 +506,7 @@ class Deployment_Measure_Wrapper():
 			community_str = self.get_communtiy_str_vultr_adv_to_peers(pop, peers)
 			n_communities = community_str.count('-c')
 			self.max_n_communities = np.maximum(n_communities, self.max_n_communities)
-			self._call("sudo client/peering prefix announce -m vtr{} {} {}".format(
+			self._call("sudo client/peering prefix announce -m {} {} {}".format(
 				pop, community_str, pref),careful=CAREFUL, **kwargs)
 			pass
 
@@ -526,13 +527,13 @@ class Deployment_Measure_Wrapper():
 
 	def advertise_to_pop(self, pop, pref, **kwargs):
 		## Advertises to all peers at a single pop
-		self._call("sudo client/peering prefix announce -m vtr{} {}".format(
+		self._call("sudo client/peering prefix announce -m {} {}".format(
 				pop, pref),careful=CAREFUL,**kwargs)
 
 	def advertise_to_pops(self, pops, pref, **kwargs):
 		for i,pop in enumerate(pops):
 			## Advertises to all peers at a single pop
-			self._call("sudo client/peering prefix announce -m vtr{} {}".format(
+			self._call("sudo client/peering prefix announce -m {} {}".format(
 					pop, pref),careful=CAREFUL,**kwargs,override_rfd=(i>0)) 
 
 	def withdraw_from_pop(self, pop, pref):
@@ -542,19 +543,19 @@ class Deployment_Measure_Wrapper():
 				pop, self.peer_to_id[pop, peer], pref),careful=CAREFUL)
 		elif self.system == 'vultr':
 			# just do the opposite of advertise
-			self._call("sudo client/peering prefix withdraw -m vtr{} {} &".format(
+			self._call("sudo client/peering prefix withdraw -m {} {} &".format(
 				pop, pref),careful=CAREFUL)
 
 	def announce_anycast(self, pref=None):
 		if pref is None:
 			pref = self.get_most_viable_prefix()
 		for i, pop in enumerate(self.pops):
-			self._call("sudo client/peering prefix announce -m vtr{} {}".format(
+			self._call("sudo client/peering prefix announce -m {} {}".format(
 				pop, pref),careful=CAREFUL,override_rfd=(i>0)) 
 		return pref
 	def withdraw_anycast(self, pref):
 		for pop in self.pops:
-			self._call("sudo client/peering prefix withdraw -m vtr{} {}".format(
+			self._call("sudo client/peering prefix withdraw -m {} {}".format(
 				pop, pref),careful=CAREFUL)
 
 	def get_condensed_targets(self, ips):
@@ -985,10 +986,9 @@ class Deployment_Measure_Wrapper():
 		print("New VPN lats: {}".format(self.pop_vpn_lats))
 		pickle.dump(self.pop_vpn_lats, open(self.pop_vpn_lats_fn,'wb'))
 
-	def load_per_popp_meas(self, fn):
+	def load_per_popp_meas(self, fn, **kwargs):
 		from analyze_measurements import Measurement_Analyzer
-		ma = Measurement_Analyzer()
-		res = parse_ingress_latencies_mp(fn)
+		res = parse_ingress_latencies_mp(fn, **kwargs)
 		return res['meas_by_popp'], res['meas_by_ip']
 
 	def convert_org_to_peer(self, org, pop):
@@ -1100,18 +1100,28 @@ class Deployment_Measure_Wrapper():
 		### have paths to interesting peers, then returning those clients and/or limiting
 		### all relevant objects to only use these interesting clients
 
-		print("Limiting to clients of interest...")
 		popp_lat_fn = os.path.join(CACHE_DIR, "{}_ingress_latencies_by_dst.csv".format(self.system))
-		meas_by_popp, meas_by_ip = self.load_per_popp_meas(popp_lat_fn)
+		meas_by_popp, meas_by_ip = self.load_per_popp_meas(popp_lat_fn, exclude_providers=True)
+		exclude_clients = {}
+		for client in meas_by_ip:
+			for popp,l in meas_by_ip[client].items():
+				if l <= 2:
+					exclude_clients[client] = None
+					break
+		exclude_clients = list(exclude_clients)
+		print("Excluding {} clients because their latency was too low".format(len(exclude_clients)))
 
-		interesting_clients = []
-		for popp in self.popps:
+		interesting_clients = {}
+		for popp in tqdm.tqdm(self.popps,desc="Limiting to clients of interest"):
 			if popp in self.provider_popps: continue
-			these_clients = meas_by_popp.get(popp, [])
-			interesting_clients = interesting_clients + these_clients
+			for client in meas_by_popp.get(popp, []):
+				interesting_clients[client] = None
+
 		
 
-		interesting_clients = list(set(interesting_clients))
+		interesting_clients = list(interesting_clients)
+		interesting_clients = get_difference(interesting_clients, exclude_clients)
+
 		print("Limited {} clients to {} clients.".format(len(clients), len(interesting_clients)))
 
 		return interesting_clients
@@ -1217,6 +1227,129 @@ class Deployment_Measure_Wrapper():
 
 		return responsive_dsts
 
+	def conduct_measurements_to_prefix_popps_ripe(self, prefix_popps, every_client_of_interest, atlas_probes,
+		popp_lat_fn, **kwargs):
+		### Prefix_popps is a list of sets of popps, where each element in the list is the set of popps you'd like to advertise
+		### the same prefix to
+		### every_client_of_interest is either a single array of clients who you want to limit (every advertisement's)
+		### focus to, or a list of clients correponding to those prefix_popps
+		### popp_lat_fn is the output filename
+
+
+		### advertise the prefixes
+
+		n_prefs = len(self.available_prefixes)
+		n_adv_rounds = int(np.ceil(len(prefix_popps) / n_prefs))
+		pw = Pinger_Wrapper(self.pops, self.pop_to_intf)
+
+		propagate_time = kwargs.get('propagate_time', 10)
+
+		all_atlas_results = []
+
+		for adv_round_i in range(n_adv_rounds):
+			if not CAREFUL:
+				self.measure_vpn_lats()
+			adv_sets = prefix_popps[n_prefs * adv_round_i: n_prefs * (adv_round_i+1)]
+			for asi,adv_set in enumerate(adv_sets):
+				print("Adv set {}:\n {}".format(asi,adv_set))
+			srcs = []
+			pref_set = []
+			popps_set = []
+			pops_set = {}
+			adv_set_to_taps = {}
+			for i, popps in enumerate(adv_sets):
+				if not CAREFUL:
+					pref = self.get_most_viable_prefix()
+				else:
+					pref = self.available_prefixes[i]
+				pref_set.append(pref)
+				measurement_src_ip = pref_to_ip(pref)
+				srcs.append(measurement_src_ip)
+				popps_set.append(popps) # each prefix will be used to measure these corresponding popps
+				self.advertise_to_popps(popps, pref)
+
+				pops = list(set([popp[0] for popp in popps])) # pops corresponding to this prefix
+				pops_set[i] = pops
+				adv_set_to_taps[i] = [self.pop_to_intf[pop] for pop in pops]
+
+			for pref,adv_set in zip(pref_set, adv_sets):
+				print(adv_set)
+				advsetstr = "--".join("-".join(list(el)) for el in adv_set)
+				print(advsetstr)
+				with open(popp_lat_fn, 'a') as f:
+					f.write("{},{}\n".format(pref,advsetstr))
+
+			if not CAREFUL:
+				print("Waiting {}s for announcements to propagate...".format(propagate_time))
+				time.sleep(propagate_time)
+
+			### launch measurements to ripe atlas
+			# call ilgars function
+			meas_info = self.ilgar_prober.multiple_source_destination_measurement(atlas_probes, srcs) 
+			
+
+			### measure the PoP catchment using my pinger
+			max_n_pops = max(len(v) for v in adv_set_to_taps.values())	
+			for pop_iter in range(max_n_pops):
+				srcs_set = []
+				taps_set = []
+				this_pops_set = []
+				clients_set = []
+				adv_set_is = []
+				for adv_set_i in range(len(adv_sets)):
+					try:
+						# different prefixes have different numbers of PoPs involved
+						# measurements are done per PoP, so this is a bit awkward
+						taps_set.append(adv_set_to_taps[adv_set_i][pop_iter])
+						srcs_set.append(srcs[adv_set_i])
+						this_pop = pops_set[adv_set_i][pop_iter] # one pop at a time
+						this_pops_set.append(this_pop)
+						adv_set_is.append(adv_set_i)
+						these_clients = every_client_of_interest
+						clients_set.append(sorted(list(these_clients)))
+					except IndexError:
+						import traceback
+						traceback.print_exc()
+						pass
+				print("PoP iter {}".format(pop_iter))
+				print(srcs_set)
+				print(taps_set)
+				print(this_pops_set)
+				print(popps_set)
+				print("Client set lens: {}".format([len(dsts) for dsts in clients_set]))
+
+				lats_results = pw.run(srcs_set, taps_set, clients_set,
+					remove_bad_meas=False)
+				pickle.dump([lats_results, srcs_set, this_pops_set,clients_set, adv_set_is], open('tmp/tmp.pkl','wb'))
+
+				t_meas = int(time.time())
+				for src,pop,dsts,asi in zip(srcs_set, this_pops_set, clients_set, adv_set_is):
+					with open(popp_lat_fn,'a') as f:
+						for client_dst in dsts:
+							rtts = []
+							for meas in lats_results[src].get(client_dst, []):
+								### For this advertisement, there's only one ingress this client has a valid path to
+								if meas.get('startpop','start') != meas.get('endpop','end'): continue
+								if meas['pop'] != pop or meas['rtt'] is None:
+									continue
+								rtts.append(meas['rtt'])
+							if len(rtts) > 0:
+								rtt = np.min(rtts)
+								f.write("{},{},{},{},{},{}\n".format(src,t_meas,client_dst,
+									pop,round(rtt,4),round(rtt - self.pop_vpn_lats[pop],4)))
+
+				del lats_results
+
+			### get results from ilgars function
+			results = self.ilgar_prober.results_obtain(meas_info)
+			all_atlas_results = all_atlas_results + results
+
+
+			for pref, popps in zip(pref_set, popps_set):
+				for pop in set([popp[0] for popp in popps]):
+					self.withdraw_from_pop(pop, pref)
+		return all_atlas_results
+
 	def conduct_measurements_to_prefix_popps(self, prefix_popps, every_client_of_interest, 
 		popp_lat_fn, **kwargs):
 		### Prefix_popps is a list of sets of popps, where each element in the list is the set of popps you'd like to advertise
@@ -1260,8 +1393,6 @@ class Deployment_Measure_Wrapper():
 				pops = list(set([popp[0] for popp in popps])) # pops corresponding to this prefix
 				pops_set[i] = pops
 				adv_set_to_taps[i] = [self.pop_to_intf[pop] for pop in pops]
-			print(self.max_n_communities)
-			continue	
 
 			if using_manual_clients:
 				for pref,adv_set in zip(pref_set, adv_sets):
@@ -1507,6 +1638,11 @@ class Deployment_Measure_Wrapper():
 
 
 if __name__ == "__main__":
+	#### Recomputes which clients to probe and corresponding ingresses for each client
+	#### from scratch
 	dmw = Deployment_Measure_Wrapper()
 	dmw.recalc_probable_clients = True
 	dmw.check_construct_client_to_peer_mapping(forceparse=True)	
+
+
+

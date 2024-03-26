@@ -10,8 +10,6 @@ from generic_measurement_utils import AS_Utils_Wrapper
 
 
 
-
-
 class Measurement_Analyzer(AS_Utils_Wrapper):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
@@ -344,8 +342,8 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 		with open(by_ingress_fn, 'r') as f:
 			with open(os.path.join(CACHE_DIR, 
 					'filtered_{}_ingress_latencies_by_dst.csv'.format(self.system)),'w') as f2:
-				for row in f:
-					_,ip,pop,peer,lat = row.strip().split(',')
+				for row in tqdm.tqdm(f,desc="Writing filtered measurements..."):
+					_,ip,pop,peer,_,lat = row.strip().split(',')
 					if int(peer) in EXCLUDE_PEERS:
 						continue
 					try:
@@ -371,14 +369,38 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			
 		res = parse_ingress_latencies_mp(by_ingress_fn)
 		meas_by_popp, meas_by_ip = res['meas_by_popp'], res['meas_by_ip']
-
+		all_24s = list(set(ip32_to_24(ip) for ip in meas_by_ip))
+		meas_peers = list(set([popp[1] for popp in meas_by_popp]))
+		print("{} targets, {} /24s, {} ingresses with a measurement, {} peers".format(
+			len(meas_by_ip), len(all_24s), len(meas_by_popp), len(set(meas_peers))))
 
 		self.check_load_ae()
 		all_peers = list(set([popp[1] for popp in self.ae.popps]))
-		meas_peers = list(set([popp[1] for popp in meas_by_popp]))
 
-		print("{} targets, {} ingresses with a measurement, {} peers".format(
-			len(meas_by_ip), len(meas_by_popp), len(set(meas_peers))))
+
+		### Characterize  number of measurements
+		provider_popps = self.provider_popps['vultr']
+		all_pops =  list(POP_TO_LOC['vultr'])
+		# number of clients by pop
+		# number of popps by pop
+		# with and without providers
+		n_clients_by_pop = {'with_provider': {pop:0 for pop in all_pops}, 'without_provider': {pop:0 for pop in all_pops}}
+		n_popps_by_pop = {'with_provider': {pop:0 for pop in all_pops}, 'without_provider': {pop:0 for pop in all_pops}}
+		for popp in meas_by_popp:
+			n_clients_by_pop['with_provider'][popp[0]] += len(meas_by_popp[popp])
+			n_popps_by_pop['with_provider'][popp[0]] += 1
+			try:
+				provider_popps[popp]
+				continue
+			except KeyError:
+				pass
+			n_clients_by_pop['without_provider'][popp[0]] += len(meas_by_popp[popp])
+			n_popps_by_pop['without_provider'][popp[0]] += 1
+		print("\nNumber of clients by PoP with provider: {}\n".format(n_clients_by_pop['with_provider']))
+		print("Number of PoPPs by PoP with provider: {}\n".format(n_popps_by_pop['with_provider']))
+		print("Number of clients by PoP without provider: {}\n".format(n_clients_by_pop['without_provider']))
+		print("Number of PoPPs by PoP without provider: {}\n".format(n_popps_by_pop['without_provider']))
+
 		# for popp in meas_by_popp:
 		# 	print("Got measurements for {}, types {}".format(popp, self.ae.popps[popp]))
 
@@ -421,6 +443,9 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 				continue
 			delta_1 = sorted_meas[1][1] - sorted_meas[0][1]
 			delta_2 = sorted_meas[2][1] -  sorted_meas[0][1]
+			if delta_2 > 2000:
+				print("{} {} ".format(ug,meas_by_ip[ug]))
+				exit(0)
 			deltas['1'].append(delta_1)
 			deltas['2'].append(delta_2)
 		for k in deltas:
@@ -428,7 +453,7 @@ class Measurement_Analyzer(AS_Utils_Wrapper):
 			plt.plot(x,cdf_x,label=k)
 		plt.grid(True)
 		plt.legend()
-		plt.xlim([0,50])
+		# plt.xlim([0,50])
 		plt.ylim([0,1])
 		self.save_fig('{}_difference_between_bests_ingresses.pdf'.format(self.system))
 
@@ -1328,8 +1353,8 @@ if __name__ == "__main__":
 	# ma.get_probing_targets()
 	# ma.user_prefix_impact()
 	# ma.get_probing_targets()
-	ma.plot_lat_over_time()
-	# ma.characterize_per_ingress_measurements()
+	# ma.plot_lat_over_time()
+	ma.characterize_per_ingress_measurements()
 	# ma.prune_per_ingress_measurements()
 	# ma.find_targs_unicast_anycast_withdrawal_experiment()
 	# ma.unicast_anycast_withdrawal_experiment()

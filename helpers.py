@@ -111,16 +111,15 @@ def ip_to_pref(ip):
 	return ".".join(ip.split(".")[0:3]) + ".0/24"
 
 def single_process_parse(args, **kwargs):
-	fn,lines,limit_pops,worker_n, = args
+	fn,lines,limit_pops,exclude_providers,worker_n, = args
 	print("Parsing results in worker : {}".format(worker_n))
 	results = {'meas_by_ip': {}, 'meas_by_popp': {}}
 
-	provider_popps = []
+	provider_popps = {}
 	for row in open(os.path.join(CACHE_DIR, 'vultr_provider_popps.csv'),'r'):
 		pop,peer = row.strip().split(',')
-		provider_popps.append((pop,peer))
+		provider_popps[pop,peer] = None
 
-	exclude_providers = False
 	if exclude_providers:
 		print("\n")
 		print("_-__----_-_-NOTE EXCLUDING PROVIDERS FROM PARSE__- --s-df-sdf-s")
@@ -137,16 +136,20 @@ def single_process_parse(args, **kwargs):
 		if i <= lines[0]:
 			continue
 		if i >= lines[1]:
-			continue 
+			break 
 		_,ip,pop,peer,_,lat = row.strip().split(',')
 		if pop not in limit_pops:continue
 		if exclude_providers:
-			if (pop,peer) in provider_popps:
+			try:
+				provider_popps[pop,peer]
 				continue
+			except KeyError:
+				pass
 		if int(peer) in EXCLUDE_PEERS:
 			continue
 		# lat = np.maximum(float(lat) * 1000,1)
 		lat = float(lat) * 1000
+		if lat > 2000: continue ## Ignore
 		popp = (pop,peer)
 		# try:
 		# 	already_completed[popp]
@@ -176,12 +179,15 @@ def single_process_parse(args, **kwargs):
 			ips_str = "-".join(results['meas_by_popp'][popp])
 			f.write("{},{},{}\n".format(popp[0],popp[1],ips_str))
 
+	del results
+
 	return True
 
-def parse_ingress_latencies_mp(fn):
+def parse_ingress_latencies_mp(fn, **kwargs):
 	import multiprocessing
 	n_workers = np.minimum(multiprocessing.cpu_count(), 8)
 	ppool = multiprocessing.Pool(processes=n_workers)
+	exclude_providers = kwargs.get('exclude_providers', False)
 
 	limit_pops = list(POP_TO_LOC['vultr'])
 	n_lines = int(check_output("wc -l {}".format(fn), shell=True).decode().split(" ")[0])
@@ -189,7 +195,7 @@ def parse_ingress_latencies_mp(fn):
 	args = []
 	for worker_n in range(n_workers):
 		args.append((fn,(n_lines_per_worker*worker_n,n_lines_per_worker*(worker_n+1)),
-			limit_pops,worker_n,))
+			limit_pops,exclude_providers,worker_n,))
 
 	results = ppool.map(single_process_parse, args)
 	ppool.close()
