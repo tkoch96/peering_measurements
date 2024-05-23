@@ -1,6 +1,10 @@
 import re
 from subprocess import call, check_output
+from peering_measurements.config import *
+
 def delete_table_rules():
+	if CAREFUL:
+		return
 	for i in range(6):
 		table_i = 201 + i
 		try:

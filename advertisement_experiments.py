@@ -1,13 +1,15 @@
+import sys
+sys.path.append("../")
 import os, re, socket, csv, time, json, numpy as np, pickle, geopy.distance, copy, glob, tqdm
-from config import *
-from helpers import *
+from peering_measurements.config import *
+from peering_measurements.helpers import *
 from subprocess import call, check_output
 import subprocess
 
-from deployment_measure_wrapper import Deployment_Measure_Wrapper
-from pinger_wrapper import Pinger_Wrapper
+from peering_measurements.deployment_measure_wrapper import Deployment_Measure_Wrapper
+from peering_measurements.pinger_wrapper import Pinger_Wrapper
 
-from delete_table_rules import delete_table_rules
+from peering_measurements.delete_table_rules import delete_table_rules
 delete_table_rules()
 
 np.random.seed(31415)
@@ -38,24 +40,24 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 		pass
 
 	def simple_anycast_test(self):
-		# dsts = ['8.8.8.8','1.1.1.1','201.191.30.3','189.106.21.13']
+		dsts = ['8.8.8.8','1.1.1.1','201.191.30.3','189.106.21.13']
 		# IWNR: [('167.62.98.92', 'miami'), ('207.245.53.134', 'mumbai'), ('148.245.66.226', 'atlanta'), 
 		# ('193.109.112.12', 'amsterdam'), ('166.88.191.39', 'mumbai'), ('85.135.22.137', 'mumbai'), ('95.47.58.4', 'frankfurt'), 
 		# ('143.106.212.1', 'mumbai'), ('139.195.194.1', 'singapore'), ('195.234.187.65', 'amsterdam')] 
 
 		"""Function meant for testing anycast latency on a small number of destinations."""
 
-		pops = list(self.pops)
+		pops = [list(self.pops)[0]]
 		n_prefs = len(self.available_prefixes)
 		n_adv_rounds = int(np.ceil(len(pops) / n_prefs))
 		# advertise all prefixes
-		for pref in self.available_prefixes:	
-			self.announce_anycast(pref)
+		# for pref in self.available_prefixes:	
+		# 	self.announce_anycast(pref)
 		# time.sleep(120)
 		srcs_set = [pref_to_ip(pref) for pref in self.available_prefixes]
 		pw = Pinger_Wrapper(self.pops, self.pop_to_intf)
 		pw.n_rounds = 2
-		pw.rate_limit = 1000 # rate limit by a lot more since we expect tons of responses
+		pw.rate_limit = 1000
 
 		for adv_round_i in range(n_adv_rounds):
 			taps_set = []
@@ -63,7 +65,6 @@ class Advertisement_Experiments(Deployment_Measure_Wrapper):
 			these_pops = pops[adv_round_i * n_prefs:(adv_round_i + 1) * n_prefs]
 			for pop in these_pops:
 				print("Getting anycast latency for pop {}".format(pop))
-				this_pop_clients = self.pop_to_clients[pop]
 				taps_set.append(self.pop_to_intf[pop])
 				clients_set.append(dsts)
 			print(these_pops)

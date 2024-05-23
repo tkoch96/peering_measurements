@@ -1,8 +1,8 @@
 import socket, time, struct, select, numpy as np, re, datetime, tqdm, multiprocessing, copy
-from config import *
 import netifaces as ni, os
 from subprocess import call, check_output
-from helpers import *
+from peering_measurements.helpers import *
+from peering_measurements.config import *
 
 # PINGER = "sudo /home/tom/pinger/target/release/pinger"
 PINGER = "sudo /home/ubuntu/pinger/target/release/pinger"
@@ -13,7 +13,6 @@ pop_to_outfn = lambda pop : os.path.join(TMP_DIR, "tcpdumpout_{}.txt".format(pop
 def parse_ping_results(*args):
 	pop, meas_ret, _id_to_meas_i, srcsdict, dstsdict, = args[0]
 	n_rounds = len(_id_to_meas_i)
-	print("Parsing pop : {}".format(pop))
 	for row in open(pop_to_outfn(pop), 'r'):
 		# parse the measurements
 		try:
@@ -132,7 +131,7 @@ class Pinger_Wrapper:
 		try:
 			if not CAREFUL:
 				for pop in self.pops:
-					call("sudo tcpdump -i {} -n icmp > {} &".format(self.pop_to_intf[pop], pop_to_outfn(pop)), shell=True)
+					call("sudo tcpdump -i {} -n icmp > {} 2> /dev/null &".format(self.pop_to_intf[pop], pop_to_outfn(pop)), shell=True)
 				# Let these start up
 				time.sleep(5)
 				
@@ -177,24 +176,28 @@ class Pinger_Wrapper:
 
 
 		meas_ret = {src: {} for src in srcs}
+		if CAREFUL:
+			return meas_ret
 		_id_to_meas_i = {OUR_PING_ID+i:i for i in range(self.n_rounds)}
 		srcsdict = {src:None for src in srcs}
 		dstsdict = {dst:None for dstset in dsts_sets for dst in dstset}
 		# Parse all the logs
-		print("Parsing tcpdump logs")
+		if kwargs.get('verb',True):
+			print("Parsing tcpdump logs")
 		if not LOW_MEM:
 			pop_jobs = [(pop,copy.deepcopy(meas_ret), copy.deepcopy(_id_to_meas_i), 
 				copy.deepcopy(srcsdict), copy.deepcopy(dstsdict), ) for pop in self.pops]
 			ppool = multiprocessing.Pool(processes=1)
 			rets = ppool.map(parse_ping_results,  pop_jobs)
 			ppool.close()
-			print("Combining rets from workers")
+			if kwargs.get('verb', True):
+				print("Combining rets from workers")
 		else:
 			rets = []
 			for pop in self.pops:
 				args = (pop, meas_ret, _id_to_meas_i, srcsdict, dstsdict, )
 				rets.append(parse_ping_results(args))
-		for ret in tqdm.tqdm(rets,desc="Parsing all measurements..."): # little complicated to combine
+		for ret in rets: # little complicated to combine
 			for src in ret:
 				for dst in ret[src]:
 					for i,meas in enumerate(ret[src][dst]):
@@ -219,8 +222,9 @@ class Pinger_Wrapper:
 		not_seen_pops = get_difference(self.pops,all_seen_pops)
 		if len(not_seen_pops) > 0:
 			### indicates that there may be a problem with the mux
-			print("{} WARNING IN PINGER_WRAPPER --- DIDNT SEE POPS {} AT ALL".format(int(time.time()),
-				not_seen_pops))
+			if kwargs.get('verb',True):
+				print("{} WARNING IN PINGER_WRAPPER --- DIDNT SEE POPS {} AT ALL".format(int(time.time()),
+					not_seen_pops))
 
 		if kwargs.get('remove_bad_meas', False):
 			for src in meas_ret:

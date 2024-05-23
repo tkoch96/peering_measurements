@@ -1,12 +1,15 @@
 import os, re, socket, csv, time, json, numpy as np, pickle, geopy.distance, copy, glob, tqdm
-from config import *
-from helpers import *
+from peering_measurements.config import *
+from peering_measurements.helpers import *
 from subprocess import call, check_output
 import subprocess
-from generic_measurement_utils import AS_Utils_Wrapper
-from pinger_wrapper import Pinger_Wrapper
+from peering_measurements.generic_measurement_utils import AS_Utils_Wrapper
+from peering_measurements.pinger_wrapper import Pinger_Wrapper
 
 asn_to_clients_fn = os.path.join(CACHE_DIR, 'asn_to_probable_clients.csv')
+
+
+PEERING_CMD = os.path.join(BASE_DIRECTORY, "client", "peering")
 
 class Deployment_Measure_Wrapper():
 	def __init__(self, **kwargs):
@@ -17,7 +20,7 @@ class Deployment_Measure_Wrapper():
 		self.max_n_communities = 0
 
 		self.addresses_that_respond_to_ping_fn = os.path.join(DATA_DIR, "addresses_that_respond_to_ping.csv")
-		all_muxes_str = check_output("sudo client/peering openvpn status", shell=True).decode().split('\n')
+		all_muxes_str = self._check_output("sudo {} openvpn status".format(PEERING_CMD), shell=True).decode().split('\n')
 		if self.system == "peering":
 			self.pops = ['amsterdam01']
 		elif self.system == "vultr":
@@ -37,9 +40,11 @@ class Deployment_Measure_Wrapper():
 
 		### prefixes we can conduct experiments with
 		self.available_prefixes = ["184.164.238.0/24","184.164.239.0/24","184.164.240.0/24", 
-			"184.164.241.0/24","184.164.242.0/24","184.164.243.0/24"]
+			"184.164.241.0/24","184.164.242.0/24","184.164.243.0/24", "184.164.246.0/24",
+			"184.164.247.0/24", "184.164.234.0/24", "184.164.235.0/24"]
+
 		# self.available_prefixes = ["184.164.238.0/24","184.164.239.0/24","184.164.240.0/24", 
-		# 	"184.164.242.0/24","184.164.243.0/24"]
+		# 	"184.164.241.0/24","184.164.242.0/24","184.164.243.0/24"]
 
 		# self.available_prefixes = ['138.185.230.0/24']
 		self.rfd_track_fn = os.path.join(CACHE_DIR, 'rfd_tracking.csv')
@@ -73,7 +78,8 @@ class Deployment_Measure_Wrapper():
 		self.pop_to_ixps = {}
 		self.popps_to_ixps = {}
 		provider_popp_fn = os.path.join(CACHE_DIR, '{}_provider_popps.csv'.format(self.system))
-		popps = csv.DictReader(open(os.path.join(DATA_DIR, "{}_peers_inferred.csv".format(self.system)), 'r'))
+		self.popps_fn = os.path.join(DATA_DIR, "{}_peers_inferred.csv".format(self.system))
+		popps = csv.DictReader(open(self.popps_fn,'r'))
 		for row in popps:
 			if self.system == "peering":
 				pop, peer, session_id = row["BGP Mux"], row["Peer ASN"], row["Session ID"]
@@ -213,7 +219,16 @@ class Deployment_Measure_Wrapper():
 			self.popps = [(pop,peer) for pop,peer in self.popps if pop in self.include_pops]
 			self.pop_to_loc = {pop:self.pop_to_loc[pop] for pop in self.include_pops}
 			self.pops = self.include_pops
-		print("Working with PoPs : {}".format(self.pops))
+
+		self.large_peers_by_pop = {}
+		for pop,peer in self.popps:
+			if int(peer) >= 65000:
+				try:
+					self.large_peers_by_pop[pop].append(peer)
+				except KeyError:
+					self.large_peers_by_pop[pop] = [peer]
+
+		# print("Working with PoPs : {}".format(self.pops))
 		if kwargs.get('quickinit', False): return
 
 		## Load utils like AS to org mapping		
@@ -246,6 +261,16 @@ class Deployment_Measure_Wrapper():
 					f.write("{},{}\n".format(peer_org,asns_str))
 
 		self.maximum_inflation = kwargs.get('maximum_inflation', 1)
+
+	def add_popp(self, popp):
+		# pop,peer,next_hop,type,ixp
+		# vtrdallas,29838,100.99.2.26,ixp_direct,62499
+		pop,peer = popp
+		nh = "LEARNED" ## indicate that we learned this 
+		with open(self.popps_fn, 'a') as f:
+			for ixp in self.pop_to_ixps.get(pop, []):
+				for peer_tp in ['ixp_direct' ,'routeserver']:
+					f.write("{},{},{},{},{}\n".format(pop,peer,nh,peer_tp,ixp))
 
 	### Route flap damping tracker, to ensure we don't advertise or withdraw too frequently
 	def get_rfd_obj(self):
@@ -282,10 +307,16 @@ class Deployment_Measure_Wrapper():
 			# only rate limit announcements
 			return
 		which_pref = [p for p in self.available_prefixes if p in cmd][0]
-		rfd_time = self.get_rfd_obj()[which_pref]
+		rfd_pref_to_time = self.get_rfd_obj()
+		rfd_time = rfd_pref_to_time[which_pref]
+		most_recent_time = max(list(rfd_pref_to_time.values()))
 		if time.time() - rfd_time < RFD_WAIT_TIME:
 			t = RFD_WAIT_TIME - (time.time() - rfd_time) + 10
-			print("Waiting {} minutes for RFD to die down.".format(t/60))
+			print("Waiting {} minutes for per-prefix RFD to die down.".format(round(t/60,2)))
+			time.sleep(t)
+		elif time.time() - most_recent_time < RFD_WAIT_TIME_PER_AS and kwargs.get('check_per_as_rfd',False):
+			t = RFD_WAIT_TIME_PER_AS - (time.time() - most_recent_time) + 10
+			print("Waiting {} minutes for per-AS RFD to die down.".format(round(t/60,2)))
 			time.sleep(t)
 
 	def track_rfd(self, cmd, **kwargs):
@@ -330,29 +361,6 @@ class Deployment_Measure_Wrapper():
 			return check_output(cmd,shell=True)
 			self.track_rfd(cmd, **kwargs)
 
-	def get_communtiy_str_vultr_adv_to_peers_old(self, pop, peers):
-		#### Basic version, ignore all routeservers
-		### (so many popps with only routeserver connections will be unreachable)
-
-		community_str = ""
-		peers_filtered = list([peer for peer in peers if int(peer) <= 65000])
-		if len(peers_filtered) != len(peers):
-			print("Note -- ignoring some peers as larger ASNs not yet supported.")
-		if len(peers_filtered) == 0:
-			raise ValueError("must be nonzero number of peers")
-
-		community_str += "-c 20473,6000 "
-
-		for peer in peers:
-			community_str += "-c 64699,{} ".format(peer)
-
-		### Be superstitious and actively exclude providers
-		providers_this_pop = [popp[1] for popp in self.provider_popps if popp[0] == pop]
-		for exclude_provider in get_difference(providers_this_pop, peers):
-			community_str += "-c 64600,{} ".format(exclude_provider)
-
-		return community_str
-
 	def get_communtiy_str_vultr_adv_to_peers(self, pop, peers):
 		### Want to advertise to these peers and only these peers at this pop
 		### ideally would include all ixp-specific rules
@@ -360,6 +368,14 @@ class Deployment_Measure_Wrapper():
 		peers_filtered = list([peer for peer in peers if int(peer) <= 65000])
 		if len(peers_filtered) != len(peers):
 			print("Note -- ignoring some peers as larger ASNs not yet supported.")
+			peers_ignored = get_difference(peers, peers_filtered)
+			for peer in peers_ignored:
+				community_str += "-l 20473,6000,{} ".format(peer)
+		annoying_large_peers = ['137409', '199524', '201838']
+		for alp in annoying_large_peers: ## We've manually noticed that these large peers don't listen to communities...
+			if alp in self.large_peers_by_pop.get(pop,[]):
+				community_str += "-l 20473,6000,{} ".format(alp)
+
 		if len(peers_filtered) == 0:
 			raise ValueError("must be nonzero number of peers")
 
@@ -371,7 +387,7 @@ class Deployment_Measure_Wrapper():
 
 		providers_include = get_intersection(peers_filtered, this_pop_providers)
 		providers_exclude = get_difference(this_pop_providers, peers_filtered)
-		for provider_exclude in providers_exclude:
+		for provider_exclude in providers_exclude: # exclude this provider
 			community_str += "-c 64600,{} ".format(provider_exclude)
 
 		exclude_onward = exclude_onward.union(set(providers_include))
@@ -379,7 +395,7 @@ class Deployment_Measure_Wrapper():
 		community_str += "-c 20473,6601 " # no export to direct peers via the IXP
 		direct_ixp_peers_include = [peer for peer in peers_filtered if 'ixp_direct' in self.popps[pop,peer]]
 		direct_ixp_peers_inlcude = get_difference(direct_ixp_peers_include, exclude_onward)
-		for direct_ixp_peer in direct_ixp_peers_include:
+		for direct_ixp_peer in direct_ixp_peers_include: # include these peers
 			community_str += "-c 64699,{} ".format(direct_ixp_peer)
 
 		exclude_onward = exclude_onward.union(set(direct_ixp_peers_include))
@@ -406,14 +422,16 @@ class Deployment_Measure_Wrapper():
 			ixps_used = list(set(ixp for peer in routeserver_peers for ixp in self.popps_to_ixps[pop,peer]))
 			## IXPs at the PoP that we definitely don't want to advertise to
 			unused_ixps = get_difference(all_ixps, ixps_used)
+			ixps_blocked = {}
 			for ixp in unused_ixps:
 				## dont advertise to these IXPs
 				community_str += '-c 64600,{} '.format(ixp)
+				ixps_blocked[ixp] = None
 			for ixp in ixps_used:
 				if ixp in self.no_community_ixps:
 					## We can't limit advertisements because we don't know how to, so block all advertisements to this IXP
 					community_str += '-c 64600,{} '.format(ixp)
-					continue
+					ixps_blocked[ixp] = None
 			peers_by_ixp = {}
 			for peer in routeserver_peers:
 				for ixp in sorted(self.popps_to_ixps[pop,peer]): # since we sort, we'll use the same IXP for all of them if we can
@@ -427,6 +445,12 @@ class Deployment_Measure_Wrapper():
 			for ixp,this_ixp_peers in peers_by_ixp.items():
 				## Advertise to this 
 				community_str += self.ixp_to_limit_str(ixp, this_ixp_peers)
+			
+			ixps_left_to_block = get_difference(ixps_used, peers_by_ixp)
+			ixps_left_to_block = get_difference(ixps_left_to_block, ixps_blocked)
+			for ixp in ixps_left_to_block:
+				community_str += "-c 64600,{} ".format(ixp)
+
 		return community_str	
 
 	def ixp_to_limit_str_old(self, ixp, peers):
@@ -490,7 +514,7 @@ class Deployment_Measure_Wrapper():
 
 	def advertise_to_peers(self, pop, peers, pref, **kwargs):
 		## check to make sure we're not advertising already
-		cmd_out = self._check_output("sudo client/peering bgp adv {}".format(pop),careful=CAREFUL)
+		cmd_out = self._check_output("sudo {} bgp adv {}".format(PEERING_CMD, pop),careful=CAREFUL)
 		if cmd_out is not None:
 			if pref in cmd_out.decode():
 				print("WARNING ---- ALREADY ADVERTISING {} TO {}".format(pref, pop))
@@ -499,18 +523,18 @@ class Deployment_Measure_Wrapper():
 
 		if self.system == 'peering':
 			# advertise only to this peer
-			self._call("sudo client/peering prefix announce -m {} -c 47065,{} {}".format( ### NEED TO UPDATE
-				pop, self.peer_to_id[pop, peer], pref),careful=CAREFUL, **kwargs)
+			self._call("sudo {} prefix announce -m {} -c 47065,{} {}".format( ### NEED TO UPDATE
+				PEERING_CMD, pop, self.peer_to_id[pop, peer], pref),careful=CAREFUL, **kwargs)
 		elif self.system == 'vultr':
 			#https://github.com/vultr/vultr-docs/tree/main/faq/as20473-bgp-customer-guide#readme
 			community_str = self.get_communtiy_str_vultr_adv_to_peers(pop, peers)
 			n_communities = community_str.count('-c')
 			self.max_n_communities = np.maximum(n_communities, self.max_n_communities)
-			self._call("sudo client/peering prefix announce -m {} {} {}".format(
-				pop, community_str, pref),careful=CAREFUL, **kwargs)
+			self._call("sudo {} prefix announce -m {} {} {}".format(
+				PEERING_CMD, pop, community_str, pref), careful=CAREFUL, **kwargs)
 			pass
 
-	def advertise_to_popps(self, popps, pref):
+	def advertise_to_popps(self, popps, pref, **kwargs):
 		## Wrapper for advertise_to_peers, since advertisements are done on the command line by pop
 		popps_by_pop = {}
 		for pop,peer in popps:
@@ -520,43 +544,43 @@ class Deployment_Measure_Wrapper():
 				popps_by_pop[pop] = [peer]
 		i=0
 		for pop, peers in popps_by_pop.items():
-			self.advertise_to_peers(pop, peers, pref, override_rfd=(i>0))
+			self.advertise_to_peers(pop, peers, pref, override_rfd=(i>0), **kwargs)
 			i += 1
 		if not CAREFUL:
 			time.sleep(30) # route convergence
 
 	def advertise_to_pop(self, pop, pref, **kwargs):
 		## Advertises to all peers at a single pop
-		self._call("sudo client/peering prefix announce -m {} {}".format(
-				pop, pref),careful=CAREFUL,**kwargs)
+		self._call("sudo {} prefix announce -m {} {}".format(
+				PEERING_CMD, pop, pref),careful=CAREFUL,**kwargs)
 
 	def advertise_to_pops(self, pops, pref, **kwargs):
 		for i,pop in enumerate(pops):
 			## Advertises to all peers at a single pop
-			self._call("sudo client/peering prefix announce -m {} {}".format(
-					pop, pref),careful=CAREFUL,**kwargs,override_rfd=(i>0)) 
+			self._call("sudo {} prefix announce -m {} {}".format(
+					PEERING_CMD, pop, pref),careful=CAREFUL,**kwargs,override_rfd=(i>0)) 
 
 	def withdraw_from_pop(self, pop, pref):
 		if self.system == 'peering':
 			# advertise only to this peer
-			self._call("sudo client/peering prefix withdraw -m {} -c 47065,{} {}".format(
-				pop, self.peer_to_id[pop, peer], pref),careful=CAREFUL)
+			self._call("sudo {} prefix withdraw -m {} -c 47065,{} {}".format(
+				PEERING_CMD, pop, self.peer_to_id[pop, peer], pref),careful=CAREFUL)
 		elif self.system == 'vultr':
 			# just do the opposite of advertise
-			self._call("sudo client/peering prefix withdraw -m {} {} &".format(
-				pop, pref),careful=CAREFUL)
+			self._call("sudo {} prefix withdraw -m {} {} &".format(
+				PEERING_CMD, pop, pref),careful=CAREFUL)
 
 	def announce_anycast(self, pref=None):
 		if pref is None:
 			pref = self.get_most_viable_prefix()
 		for i, pop in enumerate(self.pops):
-			self._call("sudo client/peering prefix announce -m {} {}".format(
-				pop, pref),careful=CAREFUL,override_rfd=(i>0)) 
+			self._call("sudo {} prefix announce -m {} {}".format(
+				PEERING_CMD, pop, pref),careful=CAREFUL,override_rfd=(i>0)) 
 		return pref
 	def withdraw_anycast(self, pref):
 		for pop in self.pops:
-			self._call("sudo client/peering prefix withdraw -m {} {}".format(
-				pop, pref),careful=CAREFUL)
+			self._call("sudo {} prefix withdraw -m {} {}".format(
+				PEERING_CMD, pop, pref),careful=CAREFUL)
 
 	def get_condensed_targets(self, ips):
 		"""Takes list of IP addresses, returns one IP address per UG. If we can't map an IP address
@@ -978,11 +1002,20 @@ class Deployment_Measure_Wrapper():
 
 		return anycast_latencies
 
-	def measure_vpn_lats(self):
+	def measure_vpn_lats(self, retry=False):
 		## Remeasure VPN lats
 		vpn_lat_results = measure_latency_ips([self.vpn_ips[pop] for pop in self.pops_list])
 		for pop,dst in zip(self.pops_list, vpn_lat_results):
-			self.pop_vpn_lats[pop] = np.min(vpn_lat_results[dst])
+			try:
+				self.pop_vpn_lats[pop] = np.min(vpn_lat_results[dst])
+			except ValueError:
+				import traceback
+				traceback.print_exc()
+				# there was some error measuring vpn lats
+				if retry:
+					print("Weird error measuring VPN lats. Ret was {}".format(vpn_lat_results))
+					exit(0)
+				return self.measure_vpn_lats(retry=True)
 		print("New VPN lats: {}".format(self.pop_vpn_lats))
 		pickle.dump(self.pop_vpn_lats, open(self.pop_vpn_lats_fn,'wb'))
 
@@ -1240,15 +1273,17 @@ class Deployment_Measure_Wrapper():
 
 		n_prefs = len(self.available_prefixes)
 		n_adv_rounds = int(np.ceil(len(prefix_popps) / n_prefs))
+		print("Going through {} adv rounds total".format(n_adv_rounds))
 		pw = Pinger_Wrapper(self.pops, self.pop_to_intf)
+		pw.n_rounds = 30 ### not a lot of clients, plenty of time. be sure you get a good measurement
 
 		propagate_time = kwargs.get('propagate_time', 10)
 
 		all_atlas_results = []
+		all_pinger_results = []
+		all_meas_info = []
 
 		for adv_round_i in range(n_adv_rounds):
-			if not CAREFUL:
-				self.measure_vpn_lats()
 			adv_sets = prefix_popps[n_prefs * adv_round_i: n_prefs * (adv_round_i+1)]
 			for asi,adv_set in enumerate(adv_sets):
 				print("Adv set {}:\n {}".format(asi,adv_set))
@@ -1257,6 +1292,8 @@ class Deployment_Measure_Wrapper():
 			popps_set = []
 			pops_set = {}
 			adv_set_to_taps = {}
+
+			
 			for i, popps in enumerate(adv_sets):
 				if not CAREFUL:
 					pref = self.get_most_viable_prefix()
@@ -1266,16 +1303,17 @@ class Deployment_Measure_Wrapper():
 				measurement_src_ip = pref_to_ip(pref)
 				srcs.append(measurement_src_ip)
 				popps_set.append(popps) # each prefix will be used to measure these corresponding popps
-				self.advertise_to_popps(popps, pref)
+				# limit per-AS RFD on the first advertisement of each set
+				self.advertise_to_popps(popps, pref, check_per_as_rfd=(i==0))
 
 				pops = list(set([popp[0] for popp in popps])) # pops corresponding to this prefix
 				pops_set[i] = pops
 				adv_set_to_taps[i] = [self.pop_to_intf[pop] for pop in pops]
 
 			for pref,adv_set in zip(pref_set, adv_sets):
-				print(adv_set)
+				# print(adv_set)
 				advsetstr = "--".join("-".join(list(el)) for el in adv_set)
-				print(advsetstr)
+				# print(advsetstr)
 				with open(popp_lat_fn, 'a') as f:
 					f.write("{},{}\n".format(pref,advsetstr))
 
@@ -1285,11 +1323,24 @@ class Deployment_Measure_Wrapper():
 
 			### launch measurements to ripe atlas
 			# call ilgars function
-			meas_info = self.ilgar_prober.multiple_source_destination_measurement(atlas_probes, srcs) 
-			
+			t_s_ripe_meas = time.time()
+			these_atlas_probes = atlas_probes[adv_round_i * n_prefs:adv_round_i * n_prefs + len(adv_sets)]
+			while True:
+				meas_info = self.ilgar_prober.multiple_source_destination_measurement(these_atlas_probes, srcs)
+				if meas_info is None:
+					print("Sleeping because the measurements weren't successfully started, so we're probably out of credits.")
+					## regardless of what the error is, it's better to just stop and do nothing than continue
+					time.sleep(3600)
+				else:
+					break
+
+			all_meas_info = all_meas_info + meas_info
 
 			### measure the PoP catchment using my pinger
-			max_n_pops = max(len(v) for v in adv_set_to_taps.values())	
+			max_n_pops = max(len(v) for v in adv_set_to_taps.values())
+			parsed_lats_results = [{} for _ in range(len(srcs))]
+			if not CAREFUL:
+				self.measure_vpn_lats()
 			for pop_iter in range(max_n_pops):
 				srcs_set = []
 				taps_set = []
@@ -1305,42 +1356,62 @@ class Deployment_Measure_Wrapper():
 						this_pop = pops_set[adv_set_i][pop_iter] # one pop at a time
 						this_pops_set.append(this_pop)
 						adv_set_is.append(adv_set_i)
-						these_clients = every_client_of_interest
-						clients_set.append(sorted(list(these_clients)))
+						clients_set.append(sorted(every_client_of_interest[adv_round_i * n_prefs + adv_set_i]))
 					except IndexError:
-						import traceback
-						traceback.print_exc()
+						# import traceback
+						# traceback.print_exc()
 						pass
-				print("PoP iter {}".format(pop_iter))
-				print(srcs_set)
-				print(taps_set)
-				print(this_pops_set)
-				print(popps_set)
-				print("Client set lens: {}".format([len(dsts) for dsts in clients_set]))
+				# prixnt("PoP iter {}".format(pop_iter))
+				# print(srcs_set)
+				# print(taps_set)
+				# print(this_pops_set)
+				# print(popps_set)
+				# print("Client set lens: {}".format([len(dsts) for dsts in clients_set]))
 
 				lats_results = pw.run(srcs_set, taps_set, clients_set,
-					remove_bad_meas=False)
-				pickle.dump([lats_results, srcs_set, this_pops_set,clients_set, adv_set_is], open('tmp/tmp.pkl','wb'))
-
+					remove_bad_meas=False, verb=False)
 				t_meas = int(time.time())
 				for src,pop,dsts,asi in zip(srcs_set, this_pops_set, clients_set, adv_set_is):
 					with open(popp_lat_fn,'a') as f:
 						for client_dst in dsts:
 							rtts = []
+							times = []
 							for meas in lats_results[src].get(client_dst, []):
 								### For this advertisement, there's only one ingress this client has a valid path to
 								if meas.get('startpop','start') != meas.get('endpop','end'): continue
 								if meas['pop'] != pop or meas['rtt'] is None:
 									continue
 								rtts.append(meas['rtt'])
+								times.append(meas['t_end'])
 							if len(rtts) > 0:
 								rtt = np.min(rtts)
 								f.write("{},{},{},{},{},{}\n".format(src,t_meas,client_dst,
 									pop,round(rtt,4),round(rtt - self.pop_vpn_lats[pop],4)))
+								for _rtt,_time in zip(rtts,times):
+									try:
+										parsed_lats_results[asi][client_dst].append((pop,_rtt,_time))
+									except KeyError:
+										parsed_lats_results[asi][client_dst] = [(pop,_rtt,_time)]
 
 				del lats_results
 
+			all_pinger_results = all_pinger_results + parsed_lats_results
+
 			### get results from ilgars function
+			while True:
+				print("Sleeping to wait for RIPE results")
+				active_meas = self.ilgar_prober.get_active_measurements()
+				if len(active_meas) > 0:
+					# break after some time threshold
+					t_sleep_ripe_meas = np.minimum(30, 12*60 - (time.time() - t_s_ripe_meas))
+					if t_sleep_ripe_meas > 10:
+						time.sleep(t_sleep_ripe_meas)
+					else:
+						break
+				else:
+					# Break if RIPE Atlas says we're done
+					print("Not waiting for more RIPE Atlas results because we're done")
+					break
 			results = self.ilgar_prober.results_obtain(meas_info)
 			all_atlas_results = all_atlas_results + results
 
@@ -1348,7 +1419,7 @@ class Deployment_Measure_Wrapper():
 			for pref, popps in zip(pref_set, popps_set):
 				for pop in set([popp[0] for popp in popps]):
 					self.withdraw_from_pop(pop, pref)
-		return all_atlas_results
+		return all_meas_info, all_atlas_results, all_pinger_results
 
 	def conduct_measurements_to_prefix_popps(self, prefix_popps, every_client_of_interest, 
 		popp_lat_fn, **kwargs):
@@ -1436,7 +1507,7 @@ class Deployment_Measure_Wrapper():
 							clients_set.append(sorted(list(these_clients)))
 						else:
 							### manually setting the clients to ping
-							clients_set.append(every_client_of_interest[adv_round_i * 6 + adv_set_i])
+							clients_set.append(every_client_of_interest[adv_round_i * n_prefs + adv_set_i])
 					except IndexError:
 						import traceback
 						traceback.print_exc()

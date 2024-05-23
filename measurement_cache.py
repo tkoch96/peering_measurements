@@ -4,7 +4,7 @@
 
 import os, pickle, numpy as np, datetime, time, ipaddress, tqdm
 from subprocess import call
-from config import *
+from peering_measurements.config import *
 
 class Measurement_Cache:
 	def __init__(self,long_load=False):

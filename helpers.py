@@ -2,7 +2,7 @@ import numpy as np, csv, socket, struct, os, re, geopy.distance, json, pickle, t
 from subprocess import call, check_output
 import geoip2.database
 from bisect import bisect_left
-from config import *
+from peering_measurements.config import *
 
 
 
@@ -61,14 +61,14 @@ def check_ping_responsive(ips):
 
 	return ret
 
-def measure_latency_ips(ips):
+def measure_latency_ips(ips, n_probe=20):
 	print("Measuring latency for {}".format(ips))
 	ret = {ip:[] for ip in ips}
 	addresses_str = " ".join(ips)
 	if addresses_str != "":
 		out_fn = 'tmp.warts'
-		scamp_cmd = 'sudo scamper -O warts -c "ping -c 20" -p 8000 -M tak2154atcolumbiadotedu'\
-			' -l peering_interfaces -o {} -i {}'.format(out_fn, addresses_str)
+		scamp_cmd = 'sudo scamper -O warts -c "ping -c {}" -p 8000 -M tak2154atcolumbiadotedu'\
+			' -l peering_interfaces -o {} -i {}'.format(n_probe, out_fn, addresses_str)
 		try:
 			check_output(scamp_cmd, shell=True)
 			cmd = "sc_warts2json {}".format(out_fn)
@@ -81,7 +81,9 @@ def measure_latency_ips(ips):
 					dst = measurement_obj['dst']
 					if measurement_obj['responses'] != []:
 						dst = measurement_obj['dst']
-						ret[dst] = [response['rtt'] * .001 for response in measurement_obj['responses']]
+						for response in measurement_obj['responses']:
+							if response['from'] == dst:
+								ret[dst].append(response['rtt'] * .001)
 		except:
 			# likely bad input
 			import traceback

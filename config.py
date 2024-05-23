@@ -1,7 +1,9 @@
-CACHE_DIR  = "cache"
-DATA_DIR = "data"
-TMP_DIR = 'tmp'
-FIG_DIR = 'figures'
+import os
+BASE_DIRECTORY = "/home/ubuntu/sparse_advertisements_code/peering_measurements"
+CACHE_DIR  = os.path.join(BASE_DIRECTORY, "cache")
+DATA_DIR = os.path.join(BASE_DIRECTORY, "data")
+TMP_DIR = os.path.join(BASE_DIRECTORY, 'tmp')
+FIG_DIR = os.path.join(BASE_DIRECTORY, 'figures')
 
 # private IP space -- from https://github.com/zmap/zmap/blob/master/conf/blacklist.conf
 private_ips = [("0.0.0.0", 8), ("10.0.0.0", 8), ("100.64.0.0", 10), ("127.0.0.0",8), ("169.254.0.0",16),
@@ -110,7 +112,8 @@ def get_col_marker(i):
 
 CAREFUL = False
 TIME_OFFSET = 3898022400 ## time delta between pinger pipeline datetime and actual datetime (fixed)
-RFD_WAIT_TIME = 2400 # PEERING testbed policy
+RFD_WAIT_TIME = 60*60 # per prefix
+RFD_WAIT_TIME_PER_AS = 45*60 # per AS
 
 
 

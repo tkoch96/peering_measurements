@@ -1,13 +1,12 @@
-import os, json, pickle, numpy as np, pytricia, glob, gzip, datetime, re, tqdm, copy
+import os, json, pickle, numpy as np, pytricia, glob, gzip, datetime, re, tqdm, copy, sys
 from ripe.atlas.cousteau import AtlasRequest
 
-from vasilis_traceroute import Traceroute
-from measurement_cache import Measurement_Cache
-from helpers import *
+sys.path.append("../")
 
-CACHE_DIR = 'cache'
-DATA_DIR = 'data'
-FIGURE_DIR = 'figures'
+from peering_measurements.vasilis_traceroute import Traceroute
+from peering_measurements.measurement_cache import Measurement_Cache
+from peering_measurements.helpers import *
+from peering_measurements.config import *
 
 
 class AS_Utils_Wrapper:
@@ -80,7 +79,7 @@ class AS_Utils_Wrapper:
 				f.write("{}\t{}\n".format(ip,asn))
 		print("Done.")
 		
-	def parse_asn(self, ip_or_asn):
+	def parse_asn(self, ip_or_asn, with_siblings=True):
 		"""Make sure you've tried to look up this IP address' ASN before calling this function."""
 		# if input is IP address, converts to organzation
 		# if input is ASN, converts to organization
@@ -112,10 +111,11 @@ class AS_Utils_Wrapper:
 			asn = int(asn)
 		else:
 			asn = str(asn)
-		try:
-			asn = self.as_siblings[asn]
-		except KeyError:
-			pass
+		if with_siblings:
+			try:
+				asn = self.as_siblings[asn]
+			except KeyError:
+				pass
 		return asn
 
 	def check_load_ip_to_asn(self):
@@ -123,11 +123,16 @@ class AS_Utils_Wrapper:
 		if self.ip_to_asn != {}: return
 		ip2asn_fn = os.path.join(CACHE_DIR, self.asn_cache_file)
 		self.ip_to_asn = {}
+		for ipaddr in ['80.249.212.38','2001:7f8:1::a502:473:1','206.72.211.9','2001:504:13::211:9','206.72.211.53','2001:504:13::211:53','218.100.9.159','2001:de8:c:2:0:2:473:1','206.71.12.56','2001:504:40:12::1:56','206.53.202.75','2001:504:61::4ff9:0:1','185.1.170.166','2001:7f8:9e::4ff9:0:1','80.81.196.21','2001:7f8::4ff9:0:1','185.1.210.159','2001:7f8:3d::4ff9:0:1','185.1.192.56','2001:7f8:a0::4ff9:0:1','103.27.171.242','2401:7500:fff6::112','185.1.208.165','2001:7f8:44::4ff9:0:1','206.82.104.55','2001:504:36::4ff9:0:1','206.197.210.63','2606:7c80:3375:50::63','202.77.90.44','2001:df0:680:6::2c','202.77.88.33','2001:df0:680:5::21','178.216.41.200','2001:7f8:5b::452','89.46.145.95','2001:678:3ac::348','208.115.137.46','2001:504:0:4:0:2:473:1','201.149.98.5','2001:504:0:11:0:2:473:1','27.111.229.119','2001:de8:4::2:473:1','185.1.107.52','2001:7f8:c1::2:473:1','203.190.230.144','2001:de8:5::2:473:1','195.182.219.135','2001:7f8:42::2:473:2','185.1.240.204','2001:7f8:12a::204','193.149.1.186','2001:7f8:f::186','38.10.0.39','2001:df2:1900:7::39','103.77.108.58','2001:df2:1900:2::58','206.41.108.73','2001:504:40:108::1:73','37.49.237.90','2001:7f8:54::1:90','187.16.214.112','2001:12f8::214:112','187.16.214.111','2001:12f8::214:111','196.60.97.11','2001:43f8:1f0::1:11','210.171.225.160','2001:de8:8::2:473:1','210.173.184.144','2001:7fa:7:2:0:2:473:1','210.173.177.85','2001:7fa:7:1:0:2:473:1','192.145.251.66','2001:7fa:8::1f','195.66.226.176','2001:7f8:4::4ff9:1','195.66.244.105','2001:7f8:4:2::4ff9:1','103.26.71.96','2001:dea:0:30::60','103.26.68.93','2001:dea:0:10::5d','196.60.10.191','2001:43f8:6d0::10:191','194.68.128.86','2001:7f8:d:fe::86','195.69.119.86','2001:7f8:d:fb::86','194.68.123.86','2001:7f8:d:ff::86','195.245.240.86','2001:7f8:d:fc::86','218.100.53.14','2001:7fa:11:4:0:4ff9:0:1','198.32.160.157','2001:504:1::a502:473:1','149.112.50.46','2001:504:125:e1::46','45.68.16.50','2801:14:9000::2:473:1','103.16.102.146','2001:de8:12:100::146','206.81.81.66','2001:504:16::4ff9','206.108.35.117','2001:504:1a::35:117','218.100.78.69','2001:7fa:11:1:0:4ff9:0:1']:
+			if ":" in ipaddr: continue
+			self.ip_to_asn[ip32_to_24(ipaddr)] = '20473'
+		for twentyfour in ['255','238', '239', '240', '241', '242', '243']:
+			self.ip_to_asn['184.164.{}.0'.format(twentyfour)] = '47065'
 		if os.path.exists(ip2asn_fn):
 			pbar = tqdm.tqdm(total=1500000, desc="Loading IP to ASN cache")
 			ip2asn_d = csv.DictReader(open(ip2asn_fn,'r'), delimiter='\t')
 			for row in ip2asn_d:
-				self.ip_to_asn[row['ip']] = self.parse_asn(row['asn'])
+				self.ip_to_asn[row['ip']] = self.parse_asn(row['asn'], with_siblings=False)
 				pbar.update(1)
 			if np.random.random() > .99:
 				# periodically delete ones we couldn't find just to check
@@ -144,14 +149,14 @@ class AS_Utils_Wrapper:
 		self.routeviews_asn_to_pref = {}
 		self.routeviews_pref_to_asn = pytricia.PyTricia()
 		# https://publicdata.caida.org/datasets/routing/routeviews-prefix2as/2022/02/
-		routeviews_pref_to_as_fn = os.path.join(DATA_DIR, "routeviews-rv2-20220216-1200.pfx2as.gz")
+		routeviews_pref_to_as_fn = os.path.join(DATA_DIR, "routeviews-rv2-20240101-1200.pfx2as.gz")
 		with gzip.open(routeviews_pref_to_as_fn) as f:
 			for row in f:
 				pref,l,asn = row.decode().strip().split('\t')
 				asns = asn.split(",")
 				for asn in asns:
 					for _asn in asn.split('_'):
-						_asn = self.parse_asn(_asn)
+						_asn = self.parse_asn(_asn, with_siblings=False)
 						try:
 							self.routeviews_asn_to_pref[_asn].append(pref + "/" + l)
 						except KeyError:
@@ -212,68 +217,6 @@ class AS_Utils_Wrapper:
 			for k in self.as_to_providers:	
 				self.as_to_providers[k] = list(set(self.as_to_providers[k]))
 
-	def check_load_bmp_cone(self, long_load=False, **kwargs):
-		try:
-			self.bmp_cone
-			if long_load:
-				self.long_loaded_bmp_cone
-			return
-		except AttributeError:
-			pass
-		import joblib
-		def save_tree(tree, file_name):
-			tree_saver = {}
-			for prefix in tree:
-				tree_saver[prefix] = tree[prefix]
-			joblib.dump(tree_saver, file_name)
-			
-		def load_tree(file_name):
-			tree_saver = joblib.load(file_name)
-			tree = pytricia.PyTricia()
-			for prefix in tree_saver.keys():
-				tree[prefix] = tree_saver[prefix]
-			return tree
-
-		bmp_cone_fn = os.path.join(CACHE_DIR, "bmp_data.pkl")
-		all_bmp_data_fn = os.path.join(CACHE_DIR, "all_bmp_data.cache")
-		
-		if long_load:
-			bmp_cone_d = list(csv.DictReader(open(os.path.join(DATA_DIR, 'bmp_conflicting_peers.csv'),'r')))
-			for row in tqdm.tqdm(bmp_cone_d, desc="Adding Microsoft BGP data to IP to ASN"):
-				source_asn = row['originAS']
-				prefix = row['Prefix']
-				self.routeviews_pref_to_asn[prefix] = self.parse_asn(source_asn)
-			self.long_loaded_bmp_cone = True
-
-		if os.path.exists(bmp_cone_fn):
-			self.bmp_cone = pickle.load(open(bmp_cone_fn,'rb'))
-			self.all_bmp_data = load_tree(all_bmp_data_fn)
-		else:
-			print("BMP cone cache not found, calculating from kusto query results")
-			bmp_cone = {}
-			bmp_cone_d = csv.DictReader(open(os.path.join(DATA_DIR, 'bmp_conflicting_peers.csv'),'r'))
-			self.all_bmp_data = pytricia.PyTricia()
-			for row in bmp_cone_d:
-				peers = row['all_peers'].split("--")
-				source_asn = row['originAS']
-				prefix = row['Prefix']
-				relabel_peers = []
-				for peer in peers:
-					peer = self.parse_asn(peer)
-					relabel_peers.append(peer)
-				peers = list(set(relabel_peers))
-				self.all_bmp_data[row['Prefix']] = peers
-				if len(peers) == 1: continue
-				for peer in peers:
-					try:
-						bmp_cone[peer] = list(set(bmp_cone[peer] + peers))
-					except KeyError:
-						bmp_cone[peer] = peers
-			pickle.dump(bmp_cone, open(bmp_cone_fn,'wb'))
-			save_tree(self.all_bmp_data, all_bmp_data_fn)
-			self.bmp_cone = bmp_cone
-			print("Done calculating BMP cone")
-
 	def update_cc_cache(self):
 		"""Updates customer cone cache with ASNs for which we don't already have the CC calculated."""
 		self.check_load_as_rel()
@@ -329,58 +272,6 @@ class AS_Utils_Wrapper:
 				self.valid_bgp_paths = {}
 		self.check_load_bmp_cone(**kwargs)
 
-	def precheck_valid_bgp_path(self, src_to_dst, src_to_mas, dst_to_pop, **kwargs):
-		"""Wrapper for check_valid_bgp_path. Returns subset of src_dst_pairs
-			for which there is a valid path according to BGP heuristics."""
-		# src_to_dst is a dict mapping from source IP addresses (~clients or probes) to lists of dsts (~peering targets)
-		# dsts have natural peer mappings and FE mappings according to dst_to_fe
-		# we don't perform any additional distance checks, we assume src_to_dst has done that already
-		valid_src_to_dst = {}
-		all_srcs = list(src_to_dst)
-		self.lookup_asns_if_needed(all_srcs)
-		self.check_load_valid_ug_peer_pops()
-		self.check_load_bmp_cone()
-
-		ug_to_peer_pops = {}
-		for metro,asn,pop,peer,_ in self.valid_ug_peer_pops:
-			# Ignore likely flag, which is just for determining if paths are likely
-			try:
-				ug_to_peer_pops[metro,asn][pop,peer] = None
-			except KeyError:
-				ug_to_peer_pops[metro,asn] = {(pop,peer):None}
-
-		for src in tqdm.tqdm(src_to_dst, desc='Checking to see which paths are valid.'):
-			valid_src_to_dst[src] = []
-			src_ug = src_to_mas[src]
-			for dst in src_to_dst[src]:
-				dst_pop = dst_to_pop[dst]
-				dst_asn = self.parse_asn(dst)
-				# check in BGP relationships
-				try:
-					ug_to_peer_pops[src_ug][dst_pop, dst_asn]
-					valid_src_to_dst[src].append(dst)
-					continue
-				except KeyError:
-					pass
-
-				# Check in BMP data
-				done = False
-				peers_adv = set()
-				src_network = ip32_to_24(src) + '/24'
-				pref_adv = self.all_bmp_data.get_key(src_network)
-				while not done and pref_adv != "0.0.0.0/0" and pref_adv is not None:
-					peers_adv = peers_adv.union(set(self.all_bmp_data.get(pref_adv)))
-					# look at covering prefixes, if they are also announced
-					# if there are none announced, this function call returns 0.0.0.0/0
-					parent = self.all_bmp_data.parent(pref_adv)
-					if parent is None or parent == "0.0.0.0/0":
-						done = True
-					else:
-						pref_adv = parent
-				if dst_asn in peers_adv:
-					valid_src_to_dst[src].append(dst)
-		return valid_src_to_dst
-
 	def get_as_rel(self, as1, as2):
 		"""Returns AS relationship between AS1 and AS2 (or their corresponding orgs if we have that 
 			data). Throws a KeyError if we don't know it."""
@@ -430,7 +321,6 @@ class AS_Utils_Wrapper:
 				this_sib_uid = self.as_siblings[sib2]
 				self.as_siblings[sib1] = this_sib_uid
 			return uid
-		
 		# It is important that these files stay the same, and are loaded in the same order, or else we have to recalculate lots of things in the cache
 		self.siblings_fns = ["vasilis_siblings_20200816.txt","as_relationships_20210201.txt",'microsoft_siblings_20220606.json'] # from Vasilis Giotsas
 		if False:
@@ -450,9 +340,10 @@ class AS_Utils_Wrapper:
 		siblings_fn = os.path.join(DATA_DIR, self.siblings_fns[2])
 		siblings_data_obj = json.load(open(siblings_fn,'r')) # NOTE -- Microsoft siblings data provides no new information afaik
 		for k,v in siblings_data_obj.items():
-			break ### TURNS OFF LOADING SIBLINGS
 			as0 = v['siblingAs'][0]
+			if int(as0) == 20473: continue
 			for as1 in v['siblingAs'][1:]:
+				if int(as1) == 20473: continue
 				uid = check_add_siblings(str(as0), str(as1), uid,v=1)
 		# form the inverse image of the mapping
 		self.org_to_as = {}
