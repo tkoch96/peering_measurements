@@ -781,29 +781,9 @@ class Deployment_Measure_Wrapper():
 		if not os.path.exists(peer_to_clients_fn) or forceparse:
 
 			vultr_peer_asns = list(set(self.utils.parse_asn(peer) for pop,peer in self.popps))
-			# peer_ccs = {}
-			# for peer in vultr_peer_asns:
-			# 	for peer_child in self.utils.get_cc(peer):
-			# 		try:
-			# 			peer_ccs[peer_child].append(peer)
-			# 		except KeyError:
-			# 			peer_ccs[peer_child] = [peer]
-			# peer_child_to_stats = {} # store CC size, number of peers its a child of
-			# for peer_child,peers in sorted(peer_ccs.items(), key = lambda el : -1 * len(el[1])):
-			# 	peer_child_to_stats[peer_child] = {'cc': len(self.utils.get_cc(peer_child)), 'n_peers': len(peers)}
-
-			# x = list([el['cc'] for el in peer_child_to_stats.values()])
-			# y = list([el['n_peers'] for el in peer_child_to_stats.values()])
-			# import matplotlib.pyplot as plt
-			# plt.scatter(x,y)
-			# plt.xlabel("CC Size")
-			# plt.ylabel("Number of Peers Child Of")
-			# plt.savefig('figures/bad_cc_investigation.pdf')
-
 			print("Creating popp to clients mapping")
 			clients = self.get_reachable_clients(limit=False)
-			# self.utils.lookup_asns_if_needed(list(set([ip32_to_24(addr) for addr in clients])))
-
+			self.utils.lookup_asns_if_needed(list(set([ip32_to_24(addr) for addr in clients])))
 			
 			asn_to_parents = {}
 			all_asns = set(list(self.utils.cc_cache)).union(set(self.utils.parse_asn(client) for client in clients))
@@ -887,11 +867,7 @@ class Deployment_Measure_Wrapper():
 			asn_to_clients = {}
 			client_asns_debug = []
 			for client in tqdm.tqdm(clients, desc="Forming peer to client mapping..."):
-				# ntwrk = network_to_peers.get_key(client)
-				# if ntwrk is None:
-				# 	continue
 				this_client_asn = self.utils.parse_asn(client)
-				# this_client_asn = self.utils.parse_asn('8048')
 				if this_client_asn is None: continue
 				try:
 					asn_to_clients[this_client_asn].append(client)
@@ -900,22 +876,20 @@ class Deployment_Measure_Wrapper():
 					asn_to_clients[this_client_asn] = [client]
 				
 				this_client_peers = get_intersection(vultr_peer_asns, 
-					get_parent_cone(this_client_asn, dbg=this_client_asn in client_asns_debug))
+					get_parent_cone(this_client_asn))
 				
 				this_client_peers = get_difference(this_client_peers, default_current_cone) # trivial
-				if this_client_asn in client_asns_debug:
-					print("{} -- {}".format(this_client_asn,this_client_peers))
 				for peer in this_client_peers:
 					try:
 						peer_to_client_asns[peer][this_client_asn] = None
 					except KeyError:
 						peer_to_client_asns[peer] = {this_client_asn: None}
-
+			# client asn likely has path to this vultr peer
 			with open(peer_to_clients_fn, 'w') as f:
 				for peer,this_peer_clients in peer_to_client_asns.items():
 					for client in this_peer_clients:
 						f.write("{},{}\n".format(peer,client))
-
+			# this client asn has some known reachable IP addresses
 			with open(asn_to_clients_fn, 'w') as f:
 				for asn,this_asn_clients in asn_to_clients.items():
 					for client in this_asn_clients:
@@ -925,6 +899,7 @@ class Deployment_Measure_Wrapper():
 			del self.addresses_that_respond_to_ping
 
 		self.popp_to_clientasn = {}
+		## popp -> client ASN mapping
 		for row in tqdm.tqdm(open(peer_to_clients_fn,'r'),
 			desc="Loading peer to client mapping..."):
 			peer,client = row.strip().split(',')
@@ -937,6 +912,7 @@ class Deployment_Measure_Wrapper():
 						self.popp_to_clientasn[pop,_peer].append(client)
 					except KeyError:
 						self.popp_to_clientasn[pop,_peer] = [client]
+		## client ASN -> reachable IP addresses mapping
 		self.asn_to_clients = {}
 		for row in tqdm.tqdm(open(asn_to_clients_fn,'r'),desc="Loading asn to clients fn..."):
 			asn,client = row.strip().split(',')
@@ -946,7 +922,7 @@ class Deployment_Measure_Wrapper():
 				self.asn_to_clients[asn].append(client)
 			except KeyError:
 				self.asn_to_clients[asn] = [client]
-		### Limit probeable clients to a maximum number per client ASN
+		### Limit reachable clients to a maximum number per client ASN so we don't have too many probes to conduct
 		limit_to_max = 1000
 		np.random.seed(31415)
 		for asn in sorted(self.asn_to_clients, key = lambda el : int(el)):
@@ -954,22 +930,15 @@ class Deployment_Measure_Wrapper():
 			np.random.shuffle(this_asn_clients)
 			self.asn_to_clients[asn] = this_asn_clients[0:limit_to_max]
 
+		### Populates two key objects
+		# (a) popp -> clientasn so we know for each ingress what the set of client ASNs we should conduct measurements to
+		# (b) clientasn -> popp so that we can easily identify which popps should be active for a given client 
 		print("{} popps with clients".format(len(self.popp_to_clientasn)))
 		#### Create popp to asn mapping to make conflict finding easier
 		self.clientasn_to_popp = {}
 		for popp,this_popp_clients in tqdm.tqdm(self.popp_to_clientasn.items(),
 			desc="tabulating clientasn to popp mapping..."):
 			if popp in self.provider_popps: continue
-			# ## Exclude clients which we know don't have a path
-			# pop,peer = popp
-			# unreachable_fn = os.path.join(CACHE_DIR, 'unreachable_dsts', 
-			# 	'{}-{}.csv'.format(pop,peer))
-			# if os.path.exists(unreachable_fn):
-			# 	bad_clients = []
-			# 	for row in open(unreachable_fn, 'r'):
-			# 		bad_clients.append(row.strip())
-			# 	self.popp_to_clientasn[popp] = get_difference(self.popp_to_clientasn[popp], bad_clients)
-
 			for client in this_popp_clients:
 				try:
 					self.clientasn_to_popp[client].append(popp)
